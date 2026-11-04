@@ -1,0 +1,45 @@
+name: Bug report
+description: Something isn't working as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping! **Please remove your bot token** from anything you paste. Never share your `.env` file.
+  - type: input
+    id: version
+    attributes:
+      label: Bot version
+      description: Shown by `/status` in Discord, or on the first line of the bot's window when it starts.
+      placeholder: "1.8.5"
+    validations:
+      required: true
+  - type: dropdown
+    id: system
+    attributes:
+      label: What is the bot running on?
+      options:
+        - Windows 10 / 11
+        - Linux
+        - macOS
+        - Raspberry Pi / other
+    validations:
+      required: true
+  - type: input
+    id: python
+    attributes:
+      label: Python version (if you know it)
+      placeholder: "3.12"
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Last lines from the bot's window
+      description: Copy the last 20 or so lines. Remove your token first.
+      render: shell

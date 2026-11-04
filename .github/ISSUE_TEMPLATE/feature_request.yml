@@ -1,0 +1,19 @@
+name: Feature request
+description: Suggest an improvement
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Ideas are welcome. The project aims to stay **easy to set up**, so features that need no extra configuration
+        (or that are optional and off by default) are the easiest to add. See the [roadmap](../blob/main/ROADMAP.md).
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like to be able to do?
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why would it help your raid team?

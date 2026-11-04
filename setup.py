@@ -116,7 +116,8 @@ def guess_timezone() -> str:
 
 
 def get_token(existing: str) -> tuple[str, dict]:
-    say("1. A browser page is opening. Click 'New Application' and give it any name (e.g. Raid Bot).")
+    say("1. A browser page is opening (if not, open https://discord.com/developers/applications yourself, on any computer).")
+    say("   Click 'New Application' and give it any name (e.g. Raid Bot).")
     say("2. In the left sidebar click 'Bot'.")
     say("3. Click 'Reset Token', then 'Copy'.")
     say("4. Come back here and paste it (right-click pastes in this window), then press Enter.")

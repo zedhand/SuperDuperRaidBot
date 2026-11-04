@@ -45,7 +45,8 @@ try:
     B.preflight(); out = "OK"
 except SystemExit as e:
     out = str(e)
-check("no .env at all -> says to run SETUP", ".env" in out and "SETUP" in out, out)
+check("no .env at all -> says how to create it (SETUP.bat on Windows, python setup.py elsewhere)",
+      ".env" in out and "setup" in out.lower(), out)
 (empty / "setup.env").write_text("x")
 (empty / ".env.txt").write_text("x")
 try:
@@ -54,6 +55,33 @@ except SystemExit as e:
     out = str(e)
 check("lookalike files are named in the message", ".env.txt" in out and "Rename" in out, out)
 B.BASE_DIR, B.ENV_PATH = work, work / ".env"
+
+print("wording on Linux/macOS (no Notepad, no .bat files)")
+real_windows = B.WINDOWS
+B.WINDOWS = False
+fresh = Path(tempfile.mkdtemp())          # an empty folder: no .env and no look-alike files
+B.BASE_DIR, B.ENV_PATH = fresh, fresh / ".env"
+try:
+    B.preflight(); out = "OK"
+except SystemExit as e:
+    out = str(e)
+check("missing .env on Linux points to python setup.py, not SETUP.bat",
+      "python setup.py" in out and "SETUP.bat" not in out and "File Explorer" not in out, out)
+B.BASE_DIR, B.ENV_PATH = work, work / ".env"
+B.TOKEN = ""
+try:
+    B.preflight(); out = "OK"
+except SystemExit as e:
+    out = str(e)
+check("empty token on Linux says 'text editor' and python setup.py", "text editor" in out and "python setup.py" in out
+      and "Notepad" not in out and "SETUP.bat" not in out, out)
+B.WINDOWS = True
+try:
+    B.preflight(); out = "OK"
+except SystemExit as e:
+    out = str(e)
+check("empty token on Windows still says Notepad and SETUP.bat", "Notepad" in out and "SETUP.bat" in out, out)
+B.WINDOWS = real_windows
 
 print("preflight")
 B.TOKEN = GOOD

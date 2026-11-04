@@ -19,14 +19,15 @@ if not defined PY (
 )
 
 rem ---- 2. no Python? install it automatically with winget
-if not defined PY (
-    echo Python isn't installed. Installing it now, this takes a minute...
-    where winget >nul 2>nul
-    if not errorlevel 1 (
-        winget install -e --id Python.Python.3.12 --scope user --silent --accept-package-agreements --accept-source-agreements
-        if exist "%LocalAppData%\Programs\Python\Python312\python.exe" set "PY=%LocalAppData%\Programs\Python\Python312\python.exe"
-    )
-)
+rem (these lines are deliberately not inside ( ) blocks: %WG% must be read when the line runs, not when the block is parsed)
+if defined PY goto :have_python
+echo Python isn't installed. Installing it now, this takes a minute...
+set "WG="
+where winget >nul 2>nul && set "WG=winget"
+if not defined WG if exist "%LocalAppData%\Microsoft\WindowsApps\winget.exe" set "WG=%LocalAppData%\Microsoft\WindowsApps\winget.exe"
+if defined WG "%WG%" install -e --id Python.Python.3.12 --scope user --silent --accept-package-agreements --accept-source-agreements
+if exist "%LocalAppData%\Programs\Python\Python312\python.exe" set "PY=%LocalAppData%\Programs\Python\Python312\python.exe"
+:have_python
 if not defined PY (
     echo.
     echo I couldn't install Python automatically.

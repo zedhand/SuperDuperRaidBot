@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.8.6
+- **Setup works on Linux and macOS as well as it does on Windows:**
+  - Startup messages no longer talk about Notepad and `SETUP.bat` on non-Windows systems; they point to `python setup.py` and "a text editor".
+  - The setup wizard always prints the Discord web address it wants you to open, so it works on a server with no screen (open it on any computer).
+  - README: the `python3-venv` step for Debian/Ubuntu/Raspberry Pi OS, a note on running setup over SSH, and an example systemd service.
+- **`SETUP.bat` finds winget by its full path** when it isn't on the PATH (it is installed on most Windows 10/11 PCs but isn't always on the PATH), so installing Python for you works in more situations.
+- README: a picture of what a raid post looks like, a Security notes section, a note on which Python to use. Added `SECURITY.md` and issue templates.
+- New tests: a fresh-install check (brand-new virtualenv, install, first run, cancelled setup) that runs on Ubuntu and Windows in CI, and a docs check (every README link and anchor works, every slash command is documented, the changelog has an entry for the current version).
+
 ## 1.8.5
 - **Fixed: v1.8.4 crashed at startup on Python 3.10 and 3.11** with `SyntaxError: f-string: unmatched '('`. Two `/config` messages used an f-string pattern that only Python 3.12 and newer accept. If you updated to v1.8.4 and the bot won't start, double-click `Update.bat` to get this fix (the updater doesn't need the bot to run). Python 3.12+ and anyone whose Python was installed by `SETUP.bat` were not affected.
 - New test (`tests/test_py310_syntax.py`) that fails on any construct needing Python 3.12+, so this can't recur even when developing on a newer Python. GitHub's automated tests also run on Python 3.10, which is what caught it.

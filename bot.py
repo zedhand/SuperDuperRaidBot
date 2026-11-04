@@ -13,7 +13,8 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
-VERSION = "1.8.5"
+VERSION = "1.8.6"
+WINDOWS = os.name == "nt"  # only used to word messages for the person reading them
 BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / ".env"  # always the .env next to bot.py, whatever folder you launch from
 load_dotenv(ENV_PATH)
@@ -1313,15 +1314,20 @@ def preflight() -> None:
         msg = f"There is no file named exactly '.env' in {BASE_DIR}."
         if lookalikes:
             msg += f"\nI found {', '.join(lookalikes)} instead. Rename it to exactly:  .env"
-        else:
+        elif WINDOWS:
             msg += "\nRun SETUP.bat (or re-extract the download) to create it."
-        msg += "\n(Windows tip: in File Explorer turn on View -> Show -> File name extensions, so you can see names like .env.txt.)"
+        else:
+            msg += "\nRun:  python setup.py   (or copy .env.example to .env and fill it in)"
+        if WINDOWS:
+            msg += "\n(Tip: in File Explorer turn on View -> Show -> File name extensions, so you can see names like .env.txt.)"
         raise SystemExit(msg)
     print("  Settings: .env found")
 
     if not TOKEN:
-        raise SystemExit("DISCORD_TOKEN is empty. Open .env in Notepad, paste your bot token after DISCORD_TOKEN=, and save.\n"
-                         "Or double-click SETUP.bat and it will do this for you.")
+        editor = "Notepad" if WINDOWS else "a text editor"
+        helper = "double-click SETUP.bat" if WINDOWS else "run:  python setup.py"
+        raise SystemExit(f"DISCORD_TOKEN is empty. Open .env in {editor}, paste your bot token after DISCORD_TOKEN=, and save.\n"
+                         f"Or {helper} and it will do this for you.")
     problem = checks.token_problem(TOKEN)
     if problem:
         raise SystemExit(f"DISCORD_TOKEN in .env looks wrong: {problem}")

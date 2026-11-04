@@ -126,7 +126,7 @@ Anyone with the **Manage Events** permission can already post raids. To let a ro
 You're done. Continue to [Using it](#using-it).
 
 ### Any OS, from source
-For Linux, macOS, a Raspberry Pi or a server. You need Python 3.10 or newer.
+For Linux, macOS, a Raspberry Pi or a server. You need Python 3.10 or newer (3.12 is recommended).
 
 ```bash
 git clone https://github.com/zedhand/SuperDuperRaidBot.git
@@ -137,12 +137,65 @@ python3 -m venv .venv
 .venv/bin/python bot.py                        # leave it running (see the 24/7 note above)
 ```
 
-Prefer to do it by hand? Copy `.env.example` to `.env`, fill it in (see [Settings](#settings-env)), and run `bot.py`. To keep
-it running on a server, use something like `systemd`, `screen` or `tmux`.
+- **Debian / Ubuntu / Raspberry Pi OS:** if `python3 -m venv .venv` says *"ensurepip is not available"*, run
+  `sudo apt install python3-venv python3-pip` first, then try again.
+- **On a server with no screen** (a VPS, a Pi over SSH): the setup wizard prints the Discord web addresses it wants you to
+  open, so open them in a browser on **any computer** and carry on. It notices when you've finished each step and doesn't
+  need to run on the same machine as your browser.
+- **Doing it by hand instead:** copy `.env.example` to `.env`, fill it in (see [Settings](#settings-env)), and run `bot.py`.
+- **Keeping it running** after you log out or reboot: use a service manager. As an *example* on a systemd Linux machine, save
+  this as `/etc/systemd/system/raidbot.service` (adjust the user and folder), then run
+  `sudo systemctl enable --now raidbot`:
+
+  ```ini
+  [Unit]
+  Description=SuperDuperRaidBot
+  After=network-online.target
+  Wants=network-online.target
+
+  [Service]
+  User=youruser
+  WorkingDirectory=/home/youruser/SuperDuperRaidBot
+  ExecStart=/home/youruser/SuperDuperRaidBot/.venv/bin/python bot.py
+  Restart=always
+  RestartSec=10
+
+  [Install]
+  WantedBy=multi-user.target
+  ```
+
+  `screen` or `tmux` also work if you just want it to survive closing your SSH window.
 
 ---
 
 ## Using it
+
+### What a raid post looks like
+Roughly this (names made up). Everyone sees the time in their own timezone, and the post updates itself as people click.
+
+```
+Naxxramas
+🏳️ @Officer              👥 7                  ⏳ in 2 days
+📅 November 14, 2026      🕒 8:00 PM
+
+🛡️ Tank (2/2)            ⚔️ Melee (1)          🏹 Ranged (2)
+1 Thrall                  4 Valeera             5 Jaina
+2 Uther                                         6 Khadgar
+
+💚 Healer (1/6)
+3 Anduin
+
+⚠️ Need 5 more healers (1/6)
+
+🪑 Bench (1): 7 Garrosh
+⏰ Late (1): 8 Sylvanas
+❌ Absence (1): 9 Illidan
+
+Event #12 • DPS 4/17 • 🔁 weekly
+[ Sign Up ]  [ Late ]  [ Tentative ]  [ Bench ]  [ Absent ]
+```
+
+Numbers show the order people signed up in. If a class icon is available (see [Class icons](#class-icons)) it's shown next to each name.
 
 ### Your first raid (officers)
 1. Go to the channel where you want the raid posted (your signup channel).
@@ -254,6 +307,9 @@ except the posts and messages the bot sends in your own Discord server.
 
 **Can I run it from my phone, or from Discord itself?** No. It needs a computer, a Raspberry Pi or a server to run on.
 
+**Which Python version do I need?** Python 3.10 or newer. 3.10 no longer gets upstream security updates, so 3.12 is
+recommended; on Windows, `SETUP.bat` installs 3.12 for you if you don't have a suitable Python.
+
 **Can I use it in more than one Discord server?** It's built for one server per bot. Run a second copy (in another folder, with
 its own bot token) for a second server.
 
@@ -310,9 +366,22 @@ When the bot can't start it explains the problem and the fix in its window. Read
 | Windows says **"Windows protected your PC"** | Click **More info → Run anyway**. The file is new and unsigned. |
 | The update failed | Close the bot, try `Update.bat` again, or [update by hand](#updating). Your settings and data are never touched. |
 
-Still stuck? Open an issue on the repository with the last lines from the bot's window (remove your token first).
+Still stuck? [Open an issue](../../issues/new/choose) with the bot version and the last lines from the bot's window
+(**remove your token first**).
 
 ---
+
+## Security notes
+
+- **The bot token is a password.** Keep `.env` private; never post it in Discord, in an issue, or in a screenshot. `.env` is
+  git-ignored. If it leaks, reset it right away (Developer Portal → Bot → **Reset Token**).
+- **What the bot can see:** member lists (that's what *Server Members Intent* is for, e.g. for `/raid unsigned`) and the
+  commands and button clicks aimed at it. It does **not** read your chat messages.
+- **What it can do:** only what its role allows in each channel. Give it just the channels it needs.
+- **`Update.bat` downloads code from this repository's GitHub releases** and checks the download against the checksum GitHub
+  publishes for it, which catches corrupted downloads. It can't protect against the repository itself being compromised, so
+  only run it if you trust this project (or your fork).
+- Found a security problem? See [SECURITY.md](SECURITY.md).
 
 ## Settings (`.env`)
 

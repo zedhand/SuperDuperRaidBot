@@ -87,10 +87,11 @@ def fresh_install() -> Path:
     return d
 
 
-def run_update(d: Path, route: str):
+def run_update(d: Path, route: str, env=None):
+    import os
     p = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(d / "update.ps1"),
                         "-ApiUrl", f"http://127.0.0.1:{state['port']}{route}", "-Yes", "-SkipDeps"],
-                       capture_output=True, text=True, timeout=120)
+                       capture_output=True, text=True, timeout=120, env={**os.environ, **(env or {})})
     return p.returncode, p.stdout + p.stderr
 
 
@@ -105,6 +106,13 @@ check("user's own icons untouched, icons help file added", (d / "icons" / "warri
 backups = list((d / "backups").glob("code-1.0-*"))
 check("previous code backed up", len(backups) == 1 and 'VERSION = "1.0"' in (backups[0] / "bot.py").read_text())
 check("checksum reported OK", "Checksum OK" in out)
+
+print("odd PowerShell module path (best effort: the real failure only reproduced on the GitHub Windows runner, where Windows PowerShell is started from PowerShell 7)")
+d = fresh_install()
+code, out = run_update(d, "/api", env={"PSModulePath": tempfile.mkdtemp()})   # does not reproduce it locally; CI is the real check
+check("still updates correctly with an unusual module path (updater uses .NET, not Get-FileHash / Expand-Archive)",
+      code == 0 and "Updated 1.0 -> 9.9" in out and 'VERSION = "9.9"' in (d / "bot.py").read_text(), out)
+check("  and still verifies the checksum", "Checksum OK" in out)
 
 print("already up to date")
 d = fresh_install()

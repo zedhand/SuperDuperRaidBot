@@ -55,13 +55,18 @@ try {
 
     if ($asset.digest -and ([string]$asset.digest) -like "sha256:*") {
         $want = ([string]$asset.digest).Substring(7).ToLower()
-        $got = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+        # .NET directly: Get-FileHash can be missing when Windows PowerShell is started from PowerShell 7
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        $stream = [System.IO.File]::OpenRead($zip)
+        try { $got = ([BitConverter]::ToString($sha.ComputeHash($stream)) -replace "-", "").ToLower() }
+        finally { $stream.Dispose(); $sha.Dispose() }
         if ($want -ne $got) { throw "The download is corrupted (checksum mismatch). Nothing was changed." }
         Say "Checksum OK."
     }
 
     $extract = Join-Path $tmp "x"
-    Expand-Archive $zip -DestinationPath $extract -Force
+    Add-Type -AssemblyName System.IO.Compression.FileSystem   # not Expand-Archive: same module-path problem
+    [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $extract)
     $src = Get-ChildItem $extract -Directory | Select-Object -First 1
     if (-not $src -or -not (Test-Path (Join-Path $src.FullName "bot.py"))) {
         throw "The download doesn't look like a bot release. Nothing was changed."

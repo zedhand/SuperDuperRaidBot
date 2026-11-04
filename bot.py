@@ -13,7 +13,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
-VERSION = "1.8"
+VERSION = "1.8.1"
 BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / ".env"  # always the .env next to bot.py, whatever folder you launch from
 load_dotenv(ENV_PATH)
@@ -232,7 +232,7 @@ async def finish_signup(interaction: discord.Interaction, event_id: int, name: s
         return await interaction.response.edit_message(content="Signups are closed.", view=None)
     status, bench_from = apply_cap(event, interaction.user.id, role, "in")
     db.set_signup(event_id, interaction.user.id, name, cls, spec, role, status, bench_from)
-    note = "" if status == "in" else f" ({wd.ROLE_LABEL[role]} slots are full, so you were put on the bench)"
+    note = "" if status == "in" else f" ({wd.ROLE_LABEL[role].rstrip('s')} slots are full, so you were put on the bench)"
     await interaction.response.edit_message(
         content=f"Signed up as **{name}** — {spec} {cls} ({wd.ROLE_LABEL[role]}){note}.", view=None)
     await update_event(event_id)
@@ -905,10 +905,12 @@ async def reminder_loop():
     for event in db.pending_reminders(now):
         if event["start_ts"] - guild_reminder_minutes(event["guild_id"]) * 60 > now:
             continue  # not due yet
-        db.mark_reminded(event["id"])
         users = [x["user_id"] for x in db.signups(event["id"]) if x["status"] in ("in", "late", "tentative")]
+        if not users:
+            continue  # nobody to remind yet: keep the reminder for when the first person signs up
+        db.mark_reminded(event["id"])
         channel = bot.get_channel(event["channel_id"])
-        if channel and users:
+        if channel:
             pings = " ".join(f"<@{u}>" for u in users)
             try:
                 await channel.send(f"⏰ **{event['title']}** starts <t:{event['start_ts']}:R>! {pings}"[:2000])
@@ -988,7 +990,11 @@ async def stats_team(interaction: discord.Interaction, days: app_commands.Range[
     rows = db.stats(interaction.guild_id, now - days * 86400, now)
     if not rows:
         return await interaction.response.send_message("No finished raids with signups in that period.", ephemeral=True)
-    lines = [f"<@{r['user_id']}> {_stats_text(r)}" for r in rows]
+    def who(uid: int) -> str:  # a name always renders; a mention shows "unknown-user" if the viewer's client hasn't loaded them
+        member = interaction.guild.get_member(uid)
+        return f"**{member.display_name}**" if member else f"<@{uid}>"
+
+    lines = [f"{who(r['user_id'])} {_stats_text(r)}" for r in rows]
     text = f"**Attendance, last {days} days** (most attended first)\n" + "\n".join(lines)
     if len(text) > 1990:
         text = text[:1950].rsplit("\n", 1)[0] + f"\n…and {len(rows) - text[:1950].count(chr(10))} more"

@@ -6,6 +6,7 @@ import subprocess
 import sys
 import time
 import webbrowser
+from datetime import datetime, timezone
 from pathlib import Path
 
 import checks
@@ -26,9 +27,17 @@ WIN_TZ = {
     "AUS Eastern Standard Time": "Australia/Sydney", "E. Australia Standard Time": "Australia/Brisbane",
     "Canada Central Standard Time": "America/Regina", "Atlantic Standard Time": "America/Halifax",
     "New Zealand Standard Time": "Pacific/Auckland", "E. South America Standard Time": "America/Sao_Paulo",
+    "British Columbia Standard Time": "America/Vancouver",  # BC moved to permanent UTC-7 in 2026
 }
-TZ_CHOICES = ["America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles",
-              "Europe/London", "Europe/Berlin", "Australia/Sydney"]
+# Used when the Windows zone name is unknown or no longer matches the PC's clock: the first of
+# these whose UTC offset equals the PC's offset right now is proposed.
+COMMON_ZONES = ["America/Vancouver", "America/Los_Angeles", "America/Edmonton", "America/Denver",
+                "America/Phoenix", "America/Winnipeg", "America/Chicago", "America/Toronto",
+                "America/New_York", "America/Halifax", "America/St_Johns", "Europe/London",
+                "Europe/Berlin", "Europe/Paris", "Australia/Sydney", "Pacific/Auckland"]
+TZ_CHOICES = ["America/Vancouver", "America/Edmonton", "America/Los_Angeles", "America/Denver",
+              "America/Chicago", "America/Toronto", "America/New_York", "Europe/London",
+              "Europe/Berlin", "Australia/Sydney"]
 
 
 def say(text=""):
@@ -71,12 +80,39 @@ def write_env(values: dict):
     ENV_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _pc_offset():
+    """The PC clock's UTC offset right now."""
+    return datetime.now().astimezone().utcoffset()
+
+
+def _offset_of(name: str):
+    """An IANA zone's UTC offset right now."""
+    from zoneinfo import ZoneInfo
+    return datetime.now(timezone.utc).astimezone(ZoneInfo(name)).utcoffset()
+
+
 def guess_timezone() -> str:
+    """Best IANA zone for this PC, or "" if unsure.
+
+    A guess from the Windows zone name is only trusted when it gives the same UTC offset as the PC's
+    clock right now, because zones change (British Columbia moved to permanent UTC-7 in 2026, so
+    "Pacific" is no longer right for BC). Otherwise the first common zone matching the clock is used."""
+    guess = ""
     try:
         out = subprocess.run(["tzutil", "/g"], capture_output=True, text=True, timeout=5).stdout.strip()
-        return WIN_TZ.get(out, "")
+        guess = WIN_TZ.get(out, "")
     except Exception:
+        pass
+    try:
+        pc = _pc_offset()
+        if guess and _offset_of(guess) == pc:
+            return guess
+        for name in COMMON_ZONES:
+            if _offset_of(name) == pc:
+                return name
         return ""
+    except Exception:
+        return guess
 
 
 def get_token(existing: str) -> tuple[str, dict]:

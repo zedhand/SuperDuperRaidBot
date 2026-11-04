@@ -81,7 +81,8 @@ class FakeResp:
 RAIDERS = [member(100 + i) for i in range(6)] + [member(999, bot=True)]
 PING_ROLE = types.SimpleNamespace(id=700, mention="<@&700>", name="raiders", mentionable=True,
                                   is_default=lambda: False, members=RAIDERS)
-GUILD = types.SimpleNamespace(id=G, me=object(), get_role=lambda rid: PING_ROLE if rid == 700 else None)
+GUILD = types.SimpleNamespace(id=G, me=object(), get_role=lambda rid: PING_ROLE if rid == 700 else None,
+                               get_member=lambda uid: types.SimpleNamespace(display_name="Dez") if uid == 10 else None)
 for c in CH.values():
     c.guild = GUILD
     c.sent = []
@@ -158,10 +159,11 @@ i = inter(pleb); run(B.stats_team.callback(i))
 check("/stats team refused for non-officers", "Only raid officers" in i.response.sent[0][0][0])
 i = inter(admin); run(B.stats_team.callback(i))
 txt = i.response.sent[0][0][0]
-check("/stats team lists everyone for an officer", "<@10>" in txt and "<@11>" in txt and txt.index("<@10>") < txt.index("<@11>"))
+check("/stats team lists everyone for an officer (display name when known, mention otherwise), most attended first",
+      "**Dez**" in txt and "<@11>" in txt and txt.index("**Dez**") < txt.index("<@11>"), txt)
 check("  mentions suppressed", i.response.sent[0][1]["allowed_mentions"].users is False)
 i = inter(leader1); run(B.stats_team.callback(i))
-check("/stats team allowed for channel leaders", "<@10>" in i.response.sent[0][0][0])
+check("/stats team allowed for channel leaders", "**Dez**" in i.response.sent[0][0][0])
 for u in range(2000, 2100):
     su(r1, u, "in")
 i = inter(admin); run(B.stats_team.callback(i))

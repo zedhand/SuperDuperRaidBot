@@ -13,7 +13,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
-VERSION = "1.8.4"
+VERSION = "1.8.5"
 BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / ".env"  # always the .env next to bot.py, whatever folder you launch from
 load_dotenv(ENV_PATH)
@@ -1069,11 +1069,13 @@ async def config_show(interaction: discord.Interaction):
              f"**Default ping role:** {f'<@&{ping}>' if ping else 'none'}"]
     lines.append(f"**Discussion threads:** {'on' if threads_default(g) else 'off'}")
     nudge = int(db.setting(g, "nudge_hours", 0))
-    lines.append(f"**Unanswered reminder:** {f'{plural(nudge, 'hour')} before' if nudge else 'off'}")
+    nudge_text = f"{plural(nudge, 'hour')} before" if nudge else "off"
+    lines.append(f"**Unanswered reminder:** {nudge_text}")
     log_ch = db.setting(g, "log_channel")
     lines.append(f"**Log channel:** {f'<#{log_ch}>' if log_ch else 'none'}")
     archive = int(db.setting(g, "archive_days", 0))
-    lines.append(f"**Delete old raid posts:** {f'{plural(archive, 'day')} after they start' if archive else 'never'}")
+    archive_text = f"{plural(archive, 'day')} after they start" if archive else "never"
+    lines.append(f"**Delete old raid posts:** {archive_text}")
     scoped: dict[int, dict] = {}
     for key, val in db.settings_with_prefix(g).items():
         for prefix, label in (("ping_role@", "ping"), ("officer_role@", "officers")):

@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.8.5
+- **Fixed: v1.8.4 crashed at startup on Python 3.10 and 3.11** with `SyntaxError: f-string: unmatched '('`. Two `/config` messages used an f-string pattern that only Python 3.12 and newer accept. If you updated to v1.8.4 and the bot won't start, double-click `Update.bat` to get this fix (the updater doesn't need the bot to run). Python 3.12+ and anyone whose Python was installed by `SETUP.bat` were not affected.
+- New test (`tests/test_py310_syntax.py`) that fails on any construct needing Python 3.12+, so this can't recur even when developing on a newer Python. GitHub's automated tests also run on Python 3.10, which is what caught it.
+
 ## 1.8.4
 - **Fixed: a player with a main character could not confirm it in the Sign Up menu.** The menu preselected the main, and choosing an already-selected option sends nothing to the bot, so a player with a single saved character was stuck (the class picker still worked). Nothing is preselected now and the main is marked with ⭐. Found while testing on a live Discord server.
 - Fixed wording like "1 days" / "1 hours" / "1 minutes" in `/config` replies and `/config show`.

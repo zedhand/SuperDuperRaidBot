@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.8.4
+- **Fixed: a player with a main character could not confirm it in the Sign Up menu.** The menu preselected the main, and choosing an already-selected option sends nothing to the bot, so a player with a single saved character was stuck (the class picker still worked). Nothing is preselected now and the main is marked with ⭐. Found while testing on a live Discord server.
+- Fixed wording like "1 days" / "1 hours" / "1 minutes" in `/config` replies and `/config show`.
+- **README rewritten:** a plain-English "what is this and how does it work" section, a prominent note that the bot must run 24/7 (and what happens when it doesn't), detailed step-by-step setup, a first-raid walkthrough, FAQ, a much longer troubleshooting table, and a tip about dismissing the private "Only you can see this" replies.
+- Verified live on a Discord server with two accounts: all signup buttons, `/raid remove` and `unsigned`, templates (save, list, delete, create from), `/raid copy`, `/raid repeat`, automatic threads (and their removal on cancel), the activity log, old-post cleanup, the unanswered nudge, and the reminder (including the fix for empty rosters).
+
 ## 1.8.3
 - **Fixed: `Update.bat` failed with "The term 'Get-FileHash' is not recognized"** when Windows PowerShell was started from PowerShell 7 (found by the new GitHub Actions run on Windows). The updater now uses .NET directly for the checksum and for unzipping, so it no longer depends on PowerShell's module path.
 

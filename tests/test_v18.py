@@ -317,5 +317,27 @@ i = inter(admin); run(B.config_show.callback(i))
 txt = i.response.sent[0][0][0]
 check("/config show lists nudge and log channel", "24 hours before" in txt and "<#90>" in txt, txt)
 
+print("character menu on the Sign Up prompt")
+chars = [{"id": 1, "name": "Main", "spec": "Fire", "wow_class": "Mage", "is_main": 1},
+         {"id": 2, "name": "Alt", "spec": "Holy", "wow_class": "Priest", "is_main": 0}]
+menu = B.CharacterSelect(1, chars)
+check("no option is preselected (re-selecting a preselected option sends nothing, which blocked one-character players)",
+      not any(o.default for o in menu.options), [o.default for o in menu.options])
+check("the main is starred, others are not", menu.options[0].label.startswith("⭐ Main") and menu.options[1].label == "Alt")
+check("option values still identify the character", [o.value for o in menu.options] == ["1", "2"])
+
+print("singular/plural wording")
+check("plural helper", B.plural(1, "day") == "1 day" and B.plural(2, "day") == "2 days" and B.plural(0, "hour") == "0 hours")
+i = inter(admin); run(B.config_archive.callback(i, 1))
+check("/config archive 1 says '1 day', not '1 days'", "1 day after" in i.response.sent[0][0][0], i.response.sent[0][0][0])
+i = inter(admin); run(B.config_nudge.callback(i, 1))
+check("/config nudge 1 says '1 hour'", i.response.sent[0][0][0].startswith("1 hour before"), i.response.sent[0][0][0])
+i = inter(admin); run(B.config_reminder.callback(i, 1))
+check("/config reminder 1 says '1 minute'", "**1 minute**" in i.response.sent[0][0][0], i.response.sent[0][0][0])
+db.set_setting(G, "archive_days", 1); db.set_setting(G, "nudge_hours", 1); db.set_setting(G, "reminder_minutes", 1)
+i = inter(admin); run(B.config_show.callback(i))
+txt = i.response.sent[0][0][0]
+check("/config show uses singular too", "1 minute before" in txt and "1 day after" in txt and "1 hour before" in txt, txt)
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

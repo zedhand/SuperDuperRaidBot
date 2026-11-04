@@ -13,7 +13,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
-VERSION = "1.8.3"
+VERSION = "1.8.4"
 BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / ".env"  # always the .env next to bot.py, whatever folder you launch from
 load_dotenv(ENV_PATH)
@@ -57,6 +57,11 @@ bot = commands.Bot(command_prefix=commands.when_mentioned, intents=intents)  # s
 # ---------------------------------------------------------------- helpers
 def is_locked(event) -> bool:
     return bool(event["closed"]) or time.time() >= event["start_ts"]
+
+
+def plural(n: int, word: str) -> str:
+    """'1 day', '2 days'."""
+    return f"{n} {word}" if n == 1 else f"{n} {word}s"
 
 
 def guild_tz(guild_id: int) -> ZoneInfo:
@@ -212,9 +217,11 @@ def char_dict(row) -> dict:
 class CharacterSelect(discord.ui.Select):
     def __init__(self, event_id: int, chars):
         self.event_id = event_id
-        opts = [discord.SelectOption(label=c["name"][:100],
+        # No option is preselected: choosing an already-selected option sends nothing to the bot, which
+        # would leave a player with one saved character unable to sign up. The main is starred instead.
+        opts = [discord.SelectOption(label=(("⭐ " if c["is_main"] else "") + c["name"])[:100],
                                      description=f"{c['spec']} {c['wow_class']}"[:100],
-                                     value=str(c["id"]), default=bool(c["is_main"]))
+                                     value=str(c["id"]))
                 for c in chars[:25]]
         super().__init__(placeholder="Pick a character…", options=opts)
 
@@ -1057,16 +1064,16 @@ async def config_show(interaction: discord.Interaction):
     officer = db.setting(g, "officer_role")
     ping = db.setting(g, "ping_role")
     lines = [f"**Timezone:** {guild_tz(g).key}",
-             f"**Reminder:** {guild_reminder_minutes(g)} minutes before the raid",
+             f"**Reminder:** {plural(guild_reminder_minutes(g), 'minute')} before the raid",
              f"**Officer role:** {f'<@&{officer}>' if officer else 'none (Manage Events permission only)'}",
              f"**Default ping role:** {f'<@&{ping}>' if ping else 'none'}"]
     lines.append(f"**Discussion threads:** {'on' if threads_default(g) else 'off'}")
     nudge = int(db.setting(g, "nudge_hours", 0))
-    lines.append(f"**Unanswered reminder:** {f'{nudge} hours before' if nudge else 'off'}")
+    lines.append(f"**Unanswered reminder:** {f'{plural(nudge, 'hour')} before' if nudge else 'off'}")
     log_ch = db.setting(g, "log_channel")
     lines.append(f"**Log channel:** {f'<#{log_ch}>' if log_ch else 'none'}")
     archive = int(db.setting(g, "archive_days", 0))
-    lines.append(f"**Delete old raid posts:** {f'{archive} days after they start' if archive else 'never'}")
+    lines.append(f"**Delete old raid posts:** {f'{plural(archive, 'day')} after they start' if archive else 'never'}")
     scoped: dict[int, dict] = {}
     for key, val in db.settings_with_prefix(g).items():
         for prefix, label in (("ping_role@", "ping"), ("officer_role@", "officers")):
@@ -1135,7 +1142,7 @@ async def config_threads(interaction: discord.Interaction, on: bool):
 async def config_archive(interaction: discord.Interaction, days: app_commands.Range[int, 0, 365]):
     db.set_setting(interaction.guild_id, "archive_days", days)
     await interaction.response.send_message(
-        f"Raid posts will be deleted {days} days after they start." if days else
+        f"Raid posts will be deleted {plural(days, 'day')} after they start." if days else
         "Raid posts will be kept forever.", ephemeral=True)
 
 
@@ -1144,7 +1151,7 @@ async def config_archive(interaction: discord.Interaction, days: app_commands.Ra
 async def config_nudge(interaction: discord.Interaction, hours: app_commands.Range[int, 0, 168]):
     db.set_setting(interaction.guild_id, "nudge_hours", hours)
     await interaction.response.send_message(
-        f"{hours} hours before a raid, I'll ping anyone in its ping role who hasn't answered. "
+        f"{plural(hours, 'hour')} before a raid, I'll ping anyone in its ping role who hasn't answered. "
         "(Needs a ping role: `/config pingrole` or `/config channel`.)" if hours else
         "No reminders for people who haven't answered.", ephemeral=True)
 
@@ -1172,7 +1179,7 @@ async def config_timezone(interaction: discord.Interaction, name: str):
 @config.command(name="reminder", description="How many minutes before a raid the bot pings signups")
 async def config_reminder(interaction: discord.Interaction, minutes: app_commands.Range[int, 1, 1440]):
     db.set_setting(interaction.guild_id, "reminder_minutes", minutes)
-    await interaction.response.send_message(f"Reminders go out **{minutes} minutes** before the raid.", ephemeral=True)
+    await interaction.response.send_message(f"Reminders go out **{plural(minutes, 'minute')}** before the raid.", ephemeral=True)
 
 
 @config.command(name="officer", description="Role allowed to manage raids (leave empty to clear)")

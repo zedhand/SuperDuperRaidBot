@@ -18,51 +18,115 @@ stats and per-group permissions, so one bot can run several raid teams in one se
 > **Not affiliated with or endorsed by Blizzard Entertainment or Raid-Helper.** World of Warcraft is a trademark of
 > Blizzard Entertainment. This is an independent hobby project.
 
+**Jump to:** [What is this?](#what-is-this-in-plain-english) · [Keep it running 24/7](#important-the-bot-must-stay-running) ·
+[Setup](#setup-windows-about-10-minutes) · [Using it](#using-it) · [FAQ](#faq) · [Troubleshooting](#troubleshooting) ·
+[Updating](#updating) · [For developers](#for-developers)
+
 ---
 
-## Why this one?
+## What is this? (in plain English)
 
-- **Genuinely free, genuinely yours.** MIT licensed. Fork it, change it, run it for your guild, rebrand it. Nothing is paywalled.
-- **Brain-easy setup.** On Windows, double-click `SETUP.bat`. It installs what's missing, opens each Discord page for you, checks every step, fills in the settings and starts the bot. No config files to hand-edit.
-- **Your data stays with you.** One small SQLite file on your machine. No cloud service, no tracking.
-- **Built for real guild structure.** Separate signup channels per raid team, each with its own ping role and its own raid leaders who can only manage their own raids.
-- **Friendly when something's wrong.** The bot checks its own setup at startup and tells you in plain English exactly what to fix.
+If your guild uses a Discord server to organise raids, you've probably seen the usual mess: "who's coming Thursday?",
+people changing their minds in chat, nobody sure whether you have a tank. This bot replaces that with **one tidy post per raid**:
 
-## Features
+- An officer types one command and a **raid post** appears in your signup channel.
+- Each player clicks **Sign Up**, picks their character, and they show up in the right column (Tank, Healer, Melee, Ranged).
+- Players who can't make it click **Absent**; unsure players click **Tentative**; late ones click **Late**.
+- If a role is full (say you only want 2 tanks), extra people go on the **bench** automatically, and the first benched
+  person is moved in and messaged if a spot opens up.
+- Everyone gets a **reminder** shortly before the raid, and the post **locks** when the raid starts.
+- Raids can **repeat every week by themselves**, and the bot keeps simple **attendance** records.
 
-**For players**
-- One-click signup: pick a saved character, or just choose a class and spec on the spot
-- Late / Tentative / Bench / Absent buttons, and a bench that **promotes you automatically** when a slot opens (you get a DM)
-- Times shown in *your own* timezone with a live countdown
-- `/myraids` lists the raids you've answered, with links; `/stats me` shows your attendance
+**How it works, with no jargon.** The bot is a small program that you run on a computer. It logs into Discord under its
+own name, like an extra (robot) member of your server. When someone types a command or clicks a button, Discord hands that
+request to the program. The program writes it into its notebook (one small file called `raidbot.db` on your computer)
+and updates the raid post you see. There are four pieces:
 
-**For raid leaders**
-- Raid-Helper-style post with granular role columns, per-role limits, and live warnings like `⚠️ Need 1 more tank (1/2)`
-- **Recurring raids** (weekly or every 2 weeks, daylight-saving safe), **templates**, and `/raid copy`
-- `/raid edit` to change time or limits (everyone who signed up is told), `/raid roster` for a copy-friendly list
-- Optional discussion thread under every post; optional automatic cleanup of old posts
-- Reminder before the raid, plus an optional "who hasn't answered yet" ping
-- **Attendance tracking:** mark no-shows and see per-person stats
+| Piece | What it is |
+|---|---|
+| **Discord** | Where everyone chats and clicks buttons. Nothing to install for players. |
+| **The bot** | The small program that reads clicks and commands and edits the posts. **This is the part you run.** |
+| **The notebook** | `raidbot.db`, a file next to the bot with everyone's characters and signups. Backed up automatically each day. |
+| **You** | The person who sets it up once and keeps it running. |
 
-**For admins**
-- Several raid teams in one server: per-channel (or per-category) ping role and raid-leader role
-- `/config` for timezone, reminders, officers and more, all from Discord
-- Activity log channel, `/status` health check (permissions, backups, uptime)
-- Automatic daily database backups (keeps the last 7)
+It does **not** read your server's chat messages. It only reacts to its own commands and buttons.
 
-## Quick start (Windows, about 3 minutes)
+---
 
-1. Download the latest **SuperDuperRaidBot zip** from the [Releases page](../../releases) and unzip it anywhere.
-2. Double-click **`SETUP.bat`** and follow the prompts.
-3. That's it. The bot starts, and from then on you launch it with **`start.bat`**. Leave the window open: closing it stops the bot.
+## Important: the bot must stay running
 
-What setup does for you: installs Python if needed; opens the Discord Developer Portal so you can create the app and
-copy its token (it checks the token immediately); waits while you switch on *Server Members Intent*; opens the invite
-link and waits until the bot is in your server; guesses your timezone; writes the settings file; then **deletes itself**.
+> **This is a Discord bot, and a bot only works while its program is running.** It can't do anything on its own from "the
+> cloud". It has to be switched on and connected to the internet so it can talk to Discord. To get the full
+> experience, **it needs to run 24 hours a day, 7 days a week.**
 
-> The bot only runs while its window is open. For 24/7, use an always-on PC or a small VPS.
+**What happens when it's not running** (computer off, asleep, the black window closed, or no internet):
+
+- Buttons on raid posts stop working and show **"This interaction failed"**.
+- Slash commands show **"The application did not respond"**, and the bot appears offline in your member list.
+- Reminders, "who hasn't answered" pings and automatic cleanup don't happen while it's off.
+- **When it comes back**, it catches up on the important things: raids that have started get locked, and recurring raids
+  post their next date. Reminders for raids that have already started are skipped.
+- **Nothing is lost.** Everyone's signups are saved in `raidbot.db` and are all still there when it starts again.
+
+**How to keep it running** (pick one):
+
+1. **A PC that's always on.** Run `start.bat` and leave the window open. In Windows, set the PC to never sleep:
+   *Settings → System → Power → Screen and sleep → put my device to sleep after: Never*. Closing the window stops the bot.
+2. **A spare laptop or mini-PC** left on in a corner is perfect for this. It barely uses any power or internet.
+3. **A Raspberry Pi or a small rented server (VPS).** It's plain Python, so it runs on Linux too. See
+   [any OS, from source](#any-os-from-source).
+
+**Start it automatically when Windows starts** (so a reboot or power cut doesn't take it down for long): press
+`Win + R`, type `shell:startup`, press Enter, then drag a **shortcut** to `start.bat` into the folder that opens.
+
+If you only run raids at set times (say two evenings a week), you *can* switch it on just for those evenings, but people
+won't be able to sign up in between, so a 24/7 setup is strongly recommended.
+
+---
+
+## Setup (Windows, about 10 minutes)
+
+You need: a Windows PC, an internet connection, and a Discord server where you have **Manage Server** permission. You do
+**not** need to know any programming. Python is installed for you if it's missing.
+
+### Step 1: Download and unzip
+1. Go to the [Releases page](../../releases) and download the latest **`SuperDuperRaidBot-v….zip`**.
+2. Right-click the zip → **Extract All…** and choose somewhere permanent, like `C:\RaidBot` or your Documents folder.
+   (Don't run it from inside the zip, and don't put it somewhere that gets cleaned up.)
+
+### Step 2: Run the setup
+Double-click **`SETUP.bat`**. Windows may say *"Windows protected your PC"* because the file is new. Click **More info →
+Run anyway**. A black window opens and does the technical part (installing Python if needed, and the bot's components, which takes a minute or two). Then it guides
+you through five short steps and opens the right Discord pages for you:
+
+| Step | What you do |
+|---|---|
+| **1. Create the bot and copy its token** | A Discord Developer Portal page opens. Click **New Application**, name it anything (e.g. "Raid Bot"), open **Bot** in the left sidebar, click **Reset Token**, then **Copy**. Paste the token into the black window (right-click pastes) and press Enter. It checks the token immediately and tells you if it's wrong. |
+| **2. Allow the bot to see member lists** | On the same **Bot** page, scroll to **Privileged Gateway Intents**, switch **Server Members Intent** on, and click **Save Changes**. The setup notices when you've done it. |
+| **3. Add the bot to your server** | A page opens asking which server to add the bot to. Pick yours and click **Authorize**. The setup notices when the bot has joined, and picks your server automatically. |
+| **4. Timezone** | Setup suggests your PC's timezone. Press Enter to accept, or choose another. Raid times you type are read in this timezone. |
+| **5. WoW version** | Choose **Retail** or **Classic Era**. This decides which classes and specs people can pick. |
+
+> **Treat the token like a password.** Anyone who has it can control your bot. Never post it in Discord or share your `.env`
+> file. If it ever leaks, go back to the Developer Portal → Bot → **Reset Token**.
+
+When it's done, `SETUP.bat` fills in your settings file (`.env`), **deletes itself**, and starts the bot. You'll see
+lines like `Logged in as …`. **Leave that window open** (see [keep it running](#important-the-bot-must-stay-running)).
+From then on, start the bot by double-clicking **`start.bat`**. To stop it, close the window.
+
+### Step 3: Check the bot has access to your channels
+The bot needs these permissions in each channel where raids are posted: **View Channel, Send Messages, Embed Links,
+Read Message History** (and **Create Public Threads** if you want discussion threads). If your signup channels are
+private, add the bot's role to them. Run **`/status`** in Discord any time: it lists channels where something is missing.
+
+### Step 4: Give officers a way to post raids
+Anyone with the **Manage Events** permission can already post raids. To let a role do it without that permission, run
+`/config officer` (see [Who can do what](#who-can-do-what)).
+
+You're done. Continue to [Using it](#using-it).
 
 ### Any OS, from source
+For Linux, macOS, a Raspberry Pi or a server. You need Python 3.10 or newer.
 
 ```bash
 git clone https://github.com/zedhand/SuperDuperRaidBot.git
@@ -70,80 +134,190 @@ cd SuperDuperRaidBot
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt      # Windows: .venv\Scripts\pip
 .venv/bin/python setup.py                      # guided setup: token, server, timezone -> writes .env
-.venv/bin/python bot.py
+.venv/bin/python bot.py                        # leave it running (see the 24/7 note above)
 ```
 
-Prefer to do it by hand? Copy `.env.example` to `.env`, fill it in (see [Settings](#settings)), and run `bot.py`.
-Raspberry Pi, Linux VPS, Docker or a Mac all work, because the bot is plain Python.
-
-### Updating
-Close the bot, then double-click **`Update.bat`**. It downloads the latest release, checks its checksum, saves your
-current program files into `backups\code-<version>-<time>`, and replaces only the program files. Your settings
-(`.env`), data (`raidbot.db`), backups and icons are never touched, and the database upgrades itself on the next start.
-
-`Update.bat` first appears in v1.8.2. If you're on an older version, update once by hand: unzip the new version into a
-**new folder**, copy your old `raidbot.db` and `.env` into it, and run `start.bat`. After that, `Update.bat` does it for you.
+Prefer to do it by hand? Copy `.env.example` to `.env`, fill it in (see [Settings](#settings-env)), and run `bot.py`. To keep
+it running on a server, use something like `systemd`, `screen` or `tmux`.
 
 ---
 
 ## Using it
 
-**Players:** save your characters once (this makes signing up a single click):
-```
-/character add   name: Thrall   wowclass: Shaman   spec: Enhancement
-```
-Then press **Sign Up** on a raid post. `/character list`, `/character main` and `/character remove` manage your list.
+### Your first raid (officers)
+1. Go to the channel where you want the raid posted (your signup channel).
+2. Type `/raid create` and press Enter. Discord shows the options. Fill in **date** (`2026-11-14`), **time** (24-hour,
+   `20:00`) and, if you like, a **title**, and the maximum number of **tanks**, **healers** and **dps** (`0` means no limit).
+3. A **raid post** appears with buttons. Players click **Sign Up**.
 
-**Officers:** post a raid in the signup channel:
 ```
 /raid create   date: 2026-11-14   time: 20:00   title: Naxxramas   tanks: 2   healers: 6   dps: 17   ping: @Raiders
 ```
-Add `repeat: Every week` and the next one posts itself when this one starts. Or save a **template** once
-(`/raid template save`) and later run `/raid create date: ... time: ... template: Naxx`.
+
+Times are in the timezone chosen during setup (change it any time with `/config timezone`). On the post itself, every player
+sees the time in **their own** timezone with a live countdown.
+
+### Signing up (players)
+1. **Once:** save your characters with `/character add` (name, class, spec). Pick one as your **main** with `/character main`.
+2. On a raid post click **Sign Up**, then choose a saved character (your main is marked ⭐) **or** pick a class and spec on
+   the spot if you haven't saved one.
+3. To change your mind click **Sign Up** again, or use the other buttons.
+
+| Button | Meaning |
+|---|---|
+| **Sign Up** | You're coming. Pick your character. |
+| **Late** | You're coming but will be late. You still count toward the roster. |
+| **Tentative** | Maybe. Not counted yet. |
+| **Bench** | Happy to fill in if there's room. |
+| **Absent** | You can't make it. |
+
+Late / Tentative / Bench / Absent reuse the character you signed up with (or your main). If you've never signed up and have
+no saved character, the bot asks you to press **Sign Up** first.
+
+### What the bot does by itself
+- **Full roles → bench → promotion.** If a role's limit is reached, the next person is benched automatically. When a spot
+  opens (someone leaves, or the limit is raised), the first auto-benched person in that role moves in and gets a **message**. People who chose Bench themselves stay on the bench.
+- **Warnings** on the post while signups are open, like `⚠️ Need 1 more tank (1/2)` or `⚠️ No healer signed up yet`.
+- **Reminder** before the raid (default 30 minutes) pinging everyone who's in, late or tentative. It's sent once. If nobody has signed up yet when it's due, it waits for the first signup.
+- **Locking.** When the start time passes the post greys out and signups close.
+- **Recurring raids.** With `repeat` set, the next one is posted when the current one starts.
+- **Daily backup** of your data (the last 7 are kept).
 
 ### Commands
 
 | Who | Command | What it does |
 |---|---|---|
 | Everyone | `/character add / list / main / remove` | Manage your saved characters |
-| Everyone | `/myraids` | Upcoming raids you've answered, with links |
-| Everyone | `/stats me` | Your attendance over the last 90 days |
+| Everyone | `/myraids` | The upcoming raids you've answered, with links |
+| Everyone | `/stats me` | Your own attendance (last 90 days) |
 | Everyone | `/help` | Command list inside Discord |
-| Officers | `/raid create` | Post a raid (optional ping, repeat, template, thread) |
-| Officers | `/raid edit` | Change title, time, description or limits; signed-up people are told |
-| Officers | `/raid copy` | Same raid on a new date, without signups |
-| Officers | `/raid repeat` | Repeat weekly / every 2 weeks, or stop repeating |
-| Officers | `/raid template save / list / delete` | Saved raid setups |
-| Officers | `/raid roster` | Private copy-friendly list of who's coming |
-| Officers | `/raid noshow` | Mark someone who signed up but didn't turn up |
-| Officers | `/raid close / cancel / remove / unsigned` | Close signups, delete a raid, remove a signup, list who hasn't answered |
+| Officers | `/raid create` | Post a raid (options: title, template, description, tanks, healers, dps, ping, repeat, thread) |
+| Officers | `/raid edit` | Change title, date, time, description or limits. If the time changes, signed-up people are told |
+| Officers | `/raid copy` | The same raid on a new date (same limits and description, no signups) |
+| Officers | `/raid repeat` | Repeat weekly or every 2 weeks, or stop repeating |
+| Officers | `/raid template save / list / delete` | Saved setups; use one with `/raid create template:` |
+| Officers | `/raid roster` | A private, copy-friendly list of who's coming |
+| Officers | `/raid noshow` | Mark someone who signed up but didn't turn up (add `undo: True` to take it back) |
+| Officers | `/raid close` | Close signups (run it again to reopen) |
+| Officers | `/raid cancel` | Delete a raid and its post (and thread) |
+| Officers | `/raid remove` | Remove someone's signup |
+| Officers | `/raid unsigned` | List (or ping) members of a role who haven't answered |
 | Officers | `/stats team` | Everyone's attendance |
-| Admins | `/config show` | Show all settings |
+| Admins | `/config show` | Show every setting |
 | Admins | `/config timezone / reminder / officer / pingrole` | Server-wide settings |
-| Admins | `/config channel` | Per-channel or per-category ping role and raid-leader role |
-| Admins | `/config threads / archive / nudge / logchannel` | Optional extras (all off until enabled) |
-| Admins | `/status` | Health check: version, uptime, permissions, last backup |
+| Admins | `/config channel` | Per-channel (or per-category) ping role and raid-leader role |
+| Admins | `/config threads / archive / nudge / logchannel` | Optional extras. All are **off** until you turn them on |
+| Admins | `/status` | Health check: version, uptime, channel permissions, last backup |
 
-**Who counts as an officer:** anyone with *Manage Events* or *Administrator*, or the role set with `/config officer`. A **channel
-leader** (a role set with `/config channel`) can manage raids only in their own channel or category.
+**Extras explained**
+- `/config threads` starts a discussion thread under every new raid.
+- `/config archive` deletes raid posts a set number of days after they start. Records are kept.
+- `/config nudge` pings people in a raid's ping role who haven't answered, a set number of hours before the raid.
+- `/config logchannel` posts a one-line note whenever a raid is created, edited, cancelled, closed or someone is marked a no-show.
+
+### Who can do what
+- **Officers** are people with the **Manage Events** (or Administrator) permission, or the role you set with `/config officer`.
+- **Admins** are people with **Manage Server**. The `/config` and `/status` commands are hidden from everyone else.
+- A **channel leader** is someone with a role set by `/config channel`. They can create and manage raids **only in that channel
+  or category**, which is how several raid teams can share one server.
 
 ### Running several raid teams
-
 Say you have categories **Raid 1**, **Raid 2** and **20 Mans**, each with a signup channel. Give the bot access to those
-channels (View Channel, Send Messages, Embed Links, Read Message History), then in each signup channel run:
+channels, then in each signup channel run:
 
 ```
 /config channel   ping: @Raid1   officer: @Raid1Leaders
 ```
 
-Raid 1's leaders now post and manage Raid 1's raids, which ping `@Raid1`, and cannot touch Raid 2's. Settings on a channel
-beat settings on its category, which beat the server-wide ones. Players share their saved characters across all teams.
+Raid 1's leaders can now post and manage Raid 1's raids, which ping `@Raid1`, and can't touch Raid 2's. Settings on a channel beat
+settings on its category, which beat the server-wide ones. Players keep one set of saved characters for all teams.
+To ping a role, the role needs **"Allow anyone to @mention this role"** switched on (Server Settings → Roles); the bot tells you if it isn't.
 
-**Pinging a role** needs the role to have *Allow anyone to @mention this role* turned on; the bot tells you if it doesn't.
+### Tip: dismiss the private replies
+Many bot replies are **private**: they say **"Only you can see this"** and have a **Dismiss message** link underneath.
+They don't bother anyone else, but they pile up in *your* view the more you use commands. Click **Dismiss message** on
+each as you go, or press **Ctrl + R** (**Cmd + R** on a Mac) to reload Discord, which clears them all at once.
 
-## Settings
+---
 
-`SETUP.bat` / `setup.py` fill in `.env` for you. Everything else is changed live with `/config`.
+## FAQ
+
+**Is it really free?** Yes. It's MIT licensed: free to use, change, share and even rebrand. There's no paid tier and no account.
+
+**Do my players need to install anything?** No. They only use Discord: slash commands and buttons.
+
+**Does the bot have to be running all the time?** Yes, for it to work. It only reacts while its program is running. See
+[the 24/7 section](#important-the-bot-must-stay-running).
+
+**Where is my data, and who can see it?** On the computer running the bot, in `raidbot.db`. Nothing is sent anywhere
+except the posts and messages the bot sends in your own Discord server.
+
+**Can I run it from my phone, or from Discord itself?** No. It needs a computer, a Raspberry Pi or a server to run on.
+
+**Can I use it in more than one Discord server?** It's built for one server per bot. Run a second copy (in another folder, with
+its own bot token) for a second server.
+
+**Can I change the class and spec list?** Yes. Retail and Classic Era come built in. Edit `wow_data.py` to add or rename specs
+(for example when a patch adds one).
+
+**How do I get class icons?** They're not included, because the artwork belongs to Blizzard. Without them the bot uses coloured
+squares. To use icons, put images named after each class in the `icons` folder (see `icons/README.txt`).
+
+**A player made a mistake. Can an officer fix their signup?** Yes. Use `/raid remove` to clear it, and they can sign up again.
+
+**What if I move to a new computer?** Copy the whole bot folder, or at least `raidbot.db` and `.env`, to the new computer and
+run `start.bat`. Everyone's characters and raids carry over.
+
+**What if my bot token leaked?** Go to the Discord Developer Portal → your application → **Bot** → **Reset Token**, paste the new
+token into `.env` (or run `SETUP.bat`/`python setup.py` again), and restart the bot.
+
+**How do I stop the bot, or remove it completely?** Close its window to stop it. To remove it, delete the folder and kick the
+bot from your server (Server Settings → Members).
+
+**Why do raid times look different to me than what I typed?** You type times in the *server's* timezone; the post shows each person
+the time in *their own* timezone. Check the server's timezone with `/config show` and change it with `/config timezone`.
+
+**Why are there "Only you can see this" messages everywhere?** They're private replies. See
+[Tip: dismiss the private replies](#tip-dismiss-the-private-replies).
+
+---
+
+## Troubleshooting
+
+When the bot can't start it explains the problem and the fix in its window. Read the last lines. For everything else:
+
+| What you see | What it means / what to do |
+|---|---|
+| Buttons say **"This interaction failed"**, or commands say **"The application did not respond"** | The bot isn't running (or lost its connection). Start `start.bat` and check the window for an error. |
+| The bot shows **offline** in the member list | Same: it isn't running. It appears online a few seconds after `start.bat` starts. |
+| Slash commands don't show up | Wait a minute and restart Discord (Ctrl + R). Make sure the bot was added with the invite link from setup (it needs the *applications.commands* scope), and that it's running. |
+| `There is no file named exactly '.env'` | The settings file must be named `.env` and sit next to `bot.py`. In File Explorer turn on *View → Show → File name extensions* to spot names like `.env.txt`. |
+| `DISCORD_TOKEN is empty` | Run `SETUP.bat` (or `python setup.py`), or paste the token after `DISCORD_TOKEN=` in `.env`. |
+| `DISCORD_TOKEN … looks wrong` | You pasted the wrong thing (Public Key, Client Secret or an ID). Use **Bot → Reset Token → Copy**. |
+| `Discord rejected this token` | The token was reset or copied wrong. **Bot → Reset Token → Copy**, then paste it into `.env`. |
+| `Server Members Intent is switched off` | Developer Portal → Bot → Privileged Gateway Intents → turn on **Server Members Intent** → Save Changes. |
+| `The bot isn't in any server yet` | Open the link it prints, pick your server and click Authorize. |
+| `GUILD_ID … isn't a server this bot is in` | Fix or blank out `GUILD_ID` in `.env`, or add the bot with the printed link. |
+| `Only raid officers can use /raid commands` | You need **Manage Events**, the `/config officer` role, or a channel officer role. |
+| `You can only manage raids in channels you're an officer for` | That raid belongs to another team's channel. Use the right channel or ask an admin. |
+| A raid post doesn't appear, or doesn't update | The bot lacks permission in that channel. Give its role **View Channel, Send Messages, Embed Links, Read Message History** there (or on its category). `/status` shows which channels have a problem. |
+| "I couldn't start a thread" | Give the bot **Create Public Threads** in that channel (or its category). |
+| `@unknown-user` or a long number instead of a name | Discord hasn't loaded that member in your view yet. Scroll the member list or reload Discord (Ctrl + R). |
+| The next recurring raid didn't appear | It's posted when the previous one **starts**. The bot must be running then and able to post in that channel. |
+| Raid times are an hour off | Check `/config show` for the timezone. Set the right one with `/config timezone` (for example `America/Vancouver`). |
+| No reminder arrived | Reminders go only to people who are signed in, late or tentative, once, before the raid starts, and only while the bot is running. Check `/config reminder`. |
+| `Python is not installed` | `SETUP.bat` installs it. If that fails, install Python from python.org, tick **Add python.exe to PATH**, and run `SETUP.bat` again. |
+| Windows says **"Windows protected your PC"** | Click **More info → Run anyway**. The file is new and unsigned. |
+| The update failed | Close the bot, try `Update.bat` again, or [update by hand](#updating). Your settings and data are never touched. |
+
+Still stuck? Open an issue on the repository with the last lines from the bot's window (remove your token first).
+
+---
+
+## Settings (`.env`)
+
+`SETUP.bat` / `setup.py` fill this in for you, and most things are changed live with `/config`. To edit it by hand, use Notepad,
+save the file, and restart the bot.
 
 | Setting | Meaning |
 |---|---|
@@ -153,38 +327,32 @@ beat settings on its category, which beat the server-wide ones. Players share th
 | `WOW_VERSION` | `retail` or `classic_era` (the class/spec list) |
 | `REMINDER_MINUTES` | Default reminder lead time (`/config reminder` overrides it) |
 
+## Updating
+
+Close the bot, then double-click **`Update.bat`**. It downloads the latest release, checks its checksum, saves your current
+program files into `backups\code-<version>-<time>`, and replaces only the program files. Your settings (`.env`), data
+(`raidbot.db`), backups and icons are never touched, and the database upgrades itself on the next start. Then start the bot
+again with `start.bat`.
+
+`Update.bat` first appears in v1.8.2. If you're on an older version, update once by hand: unzip the new version into a
+**new folder**, copy your old `raidbot.db` and `.env` into it, and run `start.bat`. After that, `Update.bat` does it for you.
+
 ## Data, backups and privacy
 
 Everything lives in `raidbot.db` (SQLite) next to the bot: characters, raids and signups. Once a day the bot copies it to
 `backups/` and keeps the newest 7. To restore, stop the bot, copy a backup over `raidbot.db`, start it again. No data leaves
-your machine except what Discord itself receives (the posts and messages the bot sends).
+your machine except what Discord itself receives (the posts and messages the bot sends). The bot does not read your server's
+chat messages.
 
 ## Class icons
 
-Class and spec data is in `wow_data.py` (add a line when a patch adds a spec). Class icons are **not included**, because
-the artwork belongs to Blizzard. Without them the bot uses coloured squares. To use icons, drop images named after each
-class into the `icons/` folder (`warrior.png`, `deathknight.png`, ...); the bot uploads them as its own emoji on startup.
+Class and spec data is in `wow_data.py` (add a line when a patch adds a spec). Class icons are **not included**, because the
+artwork belongs to Blizzard. Without them the bot uses coloured squares. To use icons, put images named after each class in the
+`icons/` folder (`warrior.png`, `deathknight.png`, …); the bot uploads them as its own emoji on startup.
 
-## Troubleshooting
+---
 
-The bot checks itself at startup and prints the exact problem and fix. Read the last lines of its window.
-
-| Message | Fix |
-|---|---|
-| `There is no file named exactly '.env'` | The file must be named `.env`, next to `bot.py`. In File Explorer turn on *View → Show → File name extensions* to spot names like `.env.txt` |
-| `DISCORD_TOKEN is empty` | Run `SETUP.bat` (or `python setup.py`), or paste the token after `DISCORD_TOKEN=` in `.env` |
-| `DISCORD_TOKEN ... looks wrong` | You pasted the Public Key, Client Secret or an ID. Use *Bot → Reset Token → Copy* |
-| `Discord rejected this token` | It was reset or copied wrong. *Bot → Reset Token → Copy*, paste into `.env` |
-| `Server Members Intent is switched off` | Developer Portal → Bot → Privileged Gateway Intents → turn it on → Save Changes |
-| `The bot isn't in any server yet` | Open the link it prints, pick your server, click Authorize |
-| `GUILD_ID ... isn't a server this bot is in` | Fix or blank out `GUILD_ID`, or add the bot with the printed link |
-| Commands don't show up | Wait a minute, restart Discord (Ctrl+R) |
-| `Only raid officers can use /raid` | You need Manage Events, the `/config officer` role, or a channel officer role |
-| A post never appears or updates | Give the bot's role View Channel, Send Messages, Embed Links and Read Message History in that channel (check with `/status`) |
-| "I couldn't start a thread" | Give the bot *Create Public Threads* in that channel |
-| Next recurring raid didn't appear | It posts when the previous one *starts*; the bot must be running then and able to post in that channel |
-
-## Development
+## For developers
 
 ```bash
 python -m venv .venv && .venv/bin/pip install -r requirements.txt
@@ -200,7 +368,7 @@ python tests/run_all.py          # every suite, offline, no Discord token needed
 | `checks.py` | Startup and setup checks against Discord (standard library only) |
 | `setup.py` / `SETUP.bat` / `start.bat` | The one-click setup and launcher |
 | `Update.bat` / `update.ps1` | One-click updater (downloads the latest release, keeps your settings and data) |
-| `tests/` | Offline test suites with a faked Discord |
+| `tests/` | Offline test suites with a faked Discord (run on every push on Ubuntu and Windows) |
 
 Contributions are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md). Ideas and what's planned are in [ROADMAP.md](ROADMAP.md),
 and the version history is in [CHANGELOG.md](CHANGELOG.md).

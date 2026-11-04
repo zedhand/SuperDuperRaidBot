@@ -197,6 +197,10 @@ CH[90].sent.clear()
 db.set_setting(G, "log_channel", None)
 i = inter(admin); run(B.raid_noshow.callback(i, live, member(22)))
 check("no log channel set -> nothing logged", CH[90].sent == [])
+i = inter(admin); run(B.raid_roster.callback(i, live))
+roster = i.response.sent[0][0][0]
+check("/raid roster leaves out a marked no-show but keeps everyone else attending",
+      "U22" not in roster and "U20" in roster and "1 attending" in roster, roster)
 
 
 async def boom(*a, **k): raise discord.Forbidden(MagicMock(status=403, reason="x"), "no")

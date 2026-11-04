@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.8.2
+- **One-click updates:** double-click `Update.bat`. It checks GitHub for the latest release, verifies the download's checksum, backs up your current program files into `backups\code-<version>-<time>`, and replaces only the program files. Your settings (`.env`), data (`raidbot.db`), backups and icons are never touched, and a failed or corrupted download changes nothing.
+- Fixed: `/raid roster` no longer lists someone you've marked as a no-show as "attending".
+- Tests: new updater suite (runs against a fake GitHub on localhost) and a roster check.
+- Verified on a live Discord server: `/raid repeat`, the activity log channel, and a member with no officer role being refused `/raid`. The real `Update.bat` flow was also run against the live v1.8.0 → v1.8.1 releases.
+
 ## 1.8.1
 - **Fixed: reminders are no longer used up when nobody has signed up yet.** If the reminder time arrived with an empty roster, the reminder was marked as sent and later signups never got one. It now waits until the first person has signed up (benched and absent players don't count).
 - **Fixed: setup suggested the wrong timezone for British Columbia.** BC now stays on UTC-7 all year, which Windows reports as a new zone, "British Columbia Standard Time". The setup wizard only knew a fixed list of Windows zone names, so it fell back to a menu where Los Angeles (UTC-8 in winter) was easy to pick, putting raid times an hour off. The guess now checks the PC clock's real UTC offset, and the menu starts with Vancouver and Edmonton. `tzdata` is now required at version 2026.2 or newer, the first release that knows BC's permanent time.

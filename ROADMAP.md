@@ -15,7 +15,6 @@ Shipped versions are listed in [CHANGELOG.md](CHANGELOG.md). Ideas below are ope
 | Required-buff checker (battle res, bloodlust) with a per-class table | Helps raid leaders spot gaps | M |
 | Warn when the melee/ranged mix is lopsided | Optional composition hints | S |
 | Offer a desktop shortcut / "start with Windows" at the end of setup | Survives reboots | S |
-| `Update.bat` that downloads the newest release and keeps `.env` and `raidbot.db` | One-click upgrades | M |
 | Docker image / systemd unit for always-on hosting | 24/7 without a PC | M |
 | More WoW presets (new expansions, Season of Discovery, Cataclysm Classic) | Edit `wow_data.py` | S |
 | Translations of bot messages | Non-English guilds | M |

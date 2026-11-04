@@ -75,9 +75,13 @@ python3 -m venv .venv
 Prefer to do it by hand? Copy `.env.example` to `.env`, fill it in (see [Settings](#settings)), and run `bot.py`.
 Raspberry Pi, Linux VPS, Docker or a Mac all work, because the bot is plain Python.
 
-### Upgrading
-Close the bot, unzip the new version into a **new folder**, copy your old `raidbot.db` and `.env` into it, then run
-`start.bat`. The database upgrades itself and old raid posts keep working.
+### Updating
+Close the bot, then double-click **`Update.bat`**. It downloads the latest release, checks its checksum, saves your
+current program files into `backups\code-<version>-<time>`, and replaces only the program files. Your settings
+(`.env`), data (`raidbot.db`), backups and icons are never touched, and the database upgrades itself on the next start.
+
+`Update.bat` first appears in v1.8.2. If you're on an older version, update once by hand: unzip the new version into a
+**new folder**, copy your old `raidbot.db` and `.env` into it, and run `start.bat`. After that, `Update.bat` does it for you.
 
 ---
 
@@ -194,6 +198,7 @@ python tests/run_all.py          # every suite, offline, no Discord token needed
 | `wow_data.py` | Class/spec/role data (Retail and Classic Era presets) |
 | `checks.py` | Startup and setup checks against Discord (standard library only) |
 | `setup.py` / `SETUP.bat` / `start.bat` | The one-click setup and launcher |
+| `Update.bat` / `update.ps1` | One-click updater (downloads the latest release, keeps your settings and data) |
 | `tests/` | Offline test suites with a faked Discord |
 
 Contributions are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md). Ideas and what's planned are in [ROADMAP.md](ROADMAP.md),

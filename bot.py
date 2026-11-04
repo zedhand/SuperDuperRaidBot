@@ -13,7 +13,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
-VERSION = "1.8.1"
+VERSION = "1.8.2"
 BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / ".env"  # always the .env next to bot.py, whatever folder you launch from
 load_dotenv(ENV_PATH)
@@ -799,7 +799,7 @@ async def raid_roster(interaction: discord.Interaction, event_id: int):
     signups = db.signups(event_id)
     groups = {g: [] for g in wd.GROUPS}
     for x in signups:
-        if x["status"] in ("in", "late") and x["char_name"]:
+        if x["status"] in ("in", "late") and x["char_name"] and not x["no_show"]:  # no-shows aren't "coming"
             groups[wd.group_for(x["wow_class"], x["spec"])].append(x["char_name"])
     lines = [f"{event['title']}  -  {sum(map(len, groups.values()))} attending"]
     for g in wd.GROUPS:

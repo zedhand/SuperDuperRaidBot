@@ -1,0 +1,11 @@
+.env
+*.db
+backups/
+__pycache__/
+.venv/
+*.pyc
+# user-supplied class artwork (not distributed)
+icons/*.png
+icons/*.jpg
+icons/*.jpeg
+icons/*.webp

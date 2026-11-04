@@ -4,6 +4,7 @@
 Self-hosted, no subscription, no premium tier, no account to create. Install it in a few minutes, and your
 guild's roster, characters and raid history stay on your own computer.
 
+[![Tests](https://github.com/zedhand/SuperDuperRaidBot/actions/workflows/tests.yml/badge.svg)](https://github.com/zedhand/SuperDuperRaidBot/actions/workflows/tests.yml)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
 ![discord.py 2.4+](https://img.shields.io/badge/discord.py-2.4%2B-5865F2)

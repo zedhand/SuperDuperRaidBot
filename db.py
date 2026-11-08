@@ -102,6 +102,7 @@ MIGRATIONS = (
     ("events", "class_caps", "TEXT NOT NULL DEFAULT ''"),     # v1.11: per-class limits, e.g. "Mage:4,Warlock:2"
     ("templates", "class_caps", "TEXT NOT NULL DEFAULT ''"),  # v1.11
     ("characters", "realm", "TEXT NOT NULL DEFAULT ''"),      # v1.13: optional realm, '' = not set
+    ("signups", "note", "TEXT NOT NULL DEFAULT ''"),          # v1.13: the player's short note, '' = none
 )
 
 
@@ -113,6 +114,18 @@ def clean_realm(text: str | None) -> str:
     nothing can turn into Discord formatting or a mention), spaces tidied, at most REALM_MAX characters, '' for none."""
     kept = "".join(c for c in (text or "") if c.isalnum() or c in " '-")
     return " ".join(kept.split())[:REALM_MAX].strip()
+
+
+NOTE_MAX = 60
+_NOTE_DROP = set("*_~`|<>@[]\\")  # Discord formatting, mentions, masked links
+
+
+def clean_note(text: str | None) -> str:
+    """A signup note as typed -> what is stored: one line, no Discord formatting, mentions or links (so it can be
+    shown in italics on the raid post without breaking it or pinging anyone), at most NOTE_MAX characters, '' for none."""
+    kept = "".join(c for c in (text or "") if c not in _NOTE_DROP and (c.isprintable() or c.isspace()))
+    kept = kept.replace("://", " ")
+    return " ".join(kept.split())[:NOTE_MAX].strip()
 
 
 def with_realm(name: str, realm: str | None) -> str:
@@ -458,6 +471,12 @@ class DB:
             "updated_ts=strftime('%s','now')",
             (event_id, user_id, char_name, wow_class, spec, role, status, bench_from))
 
+    def set_note(self, event_id, user_id, note) -> bool:
+        """Set or clear ('' / None) a player's note on their signup. The note stays when they change status or
+        character (set_signup leaves it alone) and goes with the signup. False if they aren't signed up."""
+        return self._run("UPDATE signups SET note=? WHERE event_id=? AND user_id=?",
+                         (clean_note(note), event_id, user_id)).rowcount > 0
+
     def set_no_show(self, event_id, user_id, flag):
         return self._run("UPDATE signups SET no_show=? WHERE event_id=? AND user_id=?",
                          (int(flag), event_id, user_id)).rowcount > 0
@@ -480,7 +499,7 @@ class DB:
 
     def user_upcoming(self, guild_id, user_id, now):
         return self._all(
-            "SELECT e.*, s.status AS my_status FROM signups s JOIN events e ON e.id=s.event_id "
+            "SELECT e.*, s.status AS my_status, s.note AS my_note FROM signups s JOIN events e ON e.id=s.event_id "
             "WHERE e.guild_id=? AND s.user_id=? AND e.start_ts>=? AND e.message_id!=0 ORDER BY e.start_ts",
             (guild_id, user_id, now))
 

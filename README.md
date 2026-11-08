@@ -261,6 +261,7 @@ on any single date. `/always list` shows what you're in, and `/always leave` sto
 - **Recurring raids.** With `repeat` set, the next one is posted when the current one starts.
 - **Automatic no-shows (optional).** With a voice channel set (`/config voicechannel`), 15 minutes after a raid starts the bot looks at who is in that channel. Anyone signed up as **in** who isn't there is marked as a no-show, so officers don't have to do it by hand, and the result is written to the log channel. If **nobody** is in the channel the check is skipped (the raid is probably being run somewhere else), people marked **late** are never checked, and a mistake is one `/raid noshow` (undo) away. It only looks at raids that started in the last 6 hours, so turning it on never rewrites old attendance.
 - **Class limits (optional).** `/raid create classes: Mage 4, Warlock 2` limits how many of a class can be in. Extra people go on the bench and move in when a spot opens, like role limits. The limits show in the post's footer and are kept by templates, copies and repeating raids. `/raid edit classes: off` removes them.
+- **Signup notes (optional, `/config notes`).** A player types `/note` and picks a raid they signed up for to add a short note, e.g. `late 15 min` or `can swap to heals` (up to 60 characters; leave the text out to clear it). The note stays when they change status or character. Officers see notes in `/raid roster`, and with `onpost: True` they also show in italics after the name on the raid post. Formatting, mentions and links are taken out, so a note can't ping anyone or break the post.
 - **Missing utility warning (optional, `/config buffs`).** Once 8 or more people are in and none of them can provide it, the post says `No Bloodlust yet (Shaman, Mage, Evoker, Hunter)` or `No a battle res yet (...)`. The lists are in `wow_data.py` and are short on purpose; Classic Era, Season of Discovery and WoW: Forever have no Bloodlust.
 - **New-version notice (optional, `/config updatenotice`).** About once a day the bot asks GitHub for the newest release and says so **once per version** in the log channel, with a link. GitHub only sees a request from your computer; nothing about your server is sent. `/status` then also shows the latest version.
 - **Weekly digest (optional, `/config digest`).** Every Monday after 09:00 (server time) a summary of the last 7 days is posted in the log channel: raids, attended, no-shows, who had the most no-shows.
@@ -273,6 +274,7 @@ on any single date. `/always list` shows what you're in, and `/always leave` sto
 | Everyone | `/character add / list / main / remove` | Manage your saved characters |
 | Everyone | `/character realm` | Set or clear the realm of a saved character (optional; `/character add realm:` works too) |
 | Everyone | `/myraids` | The upcoming raids you've answered, with links |
+| Everyone | `/note` | Add a short note to your signup, e.g. `late 15 min` (leave the text out to clear it). Only if an admin turned it on |
 | Everyone | `/remindme` | Get raid reminders as a private message instead of a channel ping |
 | Everyone | `/forgetme` | Delete your characters and signup history from the bot (asks first, can't be undone) |
 | Everyone | `/character import` | Look a **retail** character up on Raider.IO and save it (only if an admin turned it on) |
@@ -301,6 +303,7 @@ on any single date. `/always list` shows what you're in, and `/always leave` sto
 | Admins | `/config threads / archive / nudge / logchannel` | Optional extras. All are **off** until you turn them on |
 | Admins | `/config raiderrole` | Only members with this role can sign up (default: anyone) |
 | Admins | `/config realms` | Show each character's realm after the name on raid posts, e.g. `Thrall (Area 52)` (default: off) |
+| Admins | `/config notes` | Let players add a note to their signup with `/note`. Officers see notes in `/raid roster`; `onpost: True` also shows them on the raid post (default: off) |
 | Admins | `/config confirm` | Ask "are you sure?" before `/raid cancel` and `/raid remove` (default: off) |
 | Admins | `/config autoclose` | Close sign-ups a set number of hours before a raid (default: off) |
 | Admins | `/config voicechannel` | Mark no-shows automatically from a voice channel (default: off). `/config channel voice:` sets one per raid team |

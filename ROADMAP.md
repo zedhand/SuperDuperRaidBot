@@ -13,7 +13,7 @@ Everything below is optional and off by default unless noted. One release (v1.14
 | # | Feature | Why | Effort | Status |
 |---|---|---|---|---|
 | 1 | More WoW presets: Season of Discovery, TBC, Wrath, Cataclysm, Mists, WoW: Forever | Only data in `wow_data.py` | S | Done (on the v1.13 branch) |
-| 2 | Release automation (tag builds, scans and attaches the zip) and Dependabot | One-click releases, free security upkeep | M | Planned |
+| 2 | Release automation (tag builds, scans and attaches the zip) and Dependabot | One-click releases, free security upkeep | M | Done (on the v1.13 branch) |
 | 3 | Confirm before `/raid cancel` and `/raid remove`, plus undo for cancel (`/raid restore`, 14 days) | One mistyped ID currently deletes a raid and its signups for good | S-M | Planned |
 | 4 | `/forgetme`: a player deletes their own characters and signup history | Privacy, nearly free | S | Planned |
 | 5 | Daily backup sent to a private admin channel (`/config backupchannel`) | Backups sit on the same PC as the bot | M | Planned |
@@ -47,4 +47,5 @@ Everything below is optional and off by default unless noted. One release (v1.14
 2. Fresh unzip into an empty folder, run `SETUP.bat` with a test bot, confirm the setup files are gone and the bot is online.
 3. Copy an old `raidbot.db` in and confirm the migration and that old posts' buttons still work.
 4. In a test server: create a raid, sign up past a role limit, leave and confirm bench promotion; edit the time; try `/config channel` with a non-admin account.
-5. Scan the release for secrets (`.env`, tokens, IDs, personal paths) before publishing.
+5. Push the tag (`git tag v1.x.y && git push origin v1.x.y`). The Release workflow reruns the tests, builds the zip, scans it for
+   secrets (`.env` values, tokens, IDs, personal paths, unlisted files) and creates a **draft** release. Check the notes, then publish.

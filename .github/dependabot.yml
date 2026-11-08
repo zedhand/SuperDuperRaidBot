@@ -1,0 +1,24 @@
+# Dependabot opens a pull request when a dependency has an update. The normal test workflow runs on each one,
+# so a green PR is safe to merge. Routine updates come once a week, grouped into one PR per ecosystem to keep
+# the noise down. (Security fixes arrive straight away once "Dependabot security updates" is on in the repo's
+# Settings -> Code security.)
+version: 2
+updates:
+  - package-ecosystem: pip              # requirements.txt (discord.py, python-dotenv, tzdata)
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      python-packages:
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions   # actions/checkout, actions/setup-python in .github/workflows
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      github-actions:
+        patterns: ["*"]

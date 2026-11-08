@@ -107,7 +107,7 @@ you through five short steps and opens the right Discord pages for you:
 | **2. Allow the bot to see member lists** | On the same **Bot** page, scroll to **Privileged Gateway Intents**, switch **Server Members Intent** on, and click **Save Changes**. The setup notices when you've done it. |
 | **3. Add the bot to your server** | A page opens asking which server to add the bot to. Pick yours and click **Authorize**. The setup notices when the bot has joined, and picks your server automatically. |
 | **4. Timezone** | Setup suggests your PC's timezone. Press Enter to accept, or choose another. Raid times you type are read in this timezone. |
-| **5. WoW version** | Choose **Retail** or **Classic Era**. This decides which classes and specs people can pick. |
+| **5. WoW version** | Choose Retail, Classic Era, Season of Discovery, Burning Crusade, Wrath, Cataclysm, Mists of Pandaria or WoW: Forever. This decides which classes and specs people can pick. |
 
 > **Treat the token like a password.** Anyone who has it can control your bot. Never post it in Discord or share your `.env`
 > file. If it ever leaks, go back to the Developer Portal → Bot → **Reset Token**.
@@ -261,7 +261,7 @@ on any single date. `/always list` shows what you're in, and `/always leave` sto
 - **Recurring raids.** With `repeat` set, the next one is posted when the current one starts.
 - **Automatic no-shows (optional).** With a voice channel set (`/config voicechannel`), 15 minutes after a raid starts the bot looks at who is in that channel. Anyone signed up as **in** who isn't there is marked as a no-show, so officers don't have to do it by hand, and the result is written to the log channel. If **nobody** is in the channel the check is skipped (the raid is probably being run somewhere else), people marked **late** are never checked, and a mistake is one `/raid noshow` (undo) away. It only looks at raids that started in the last 6 hours, so turning it on never rewrites old attendance.
 - **Class limits (optional).** `/raid create classes: Mage 4, Warlock 2` limits how many of a class can be in. Extra people go on the bench and move in when a spot opens, like role limits. The limits show in the post's footer and are kept by templates, copies and repeating raids. `/raid edit classes: off` removes them.
-- **Missing utility warning (optional, `/config buffs`).** Once 8 or more people are in and none of them can provide it, the post says `No Bloodlust yet (Shaman, Mage, Evoker, Hunter)` or `No a battle res yet (...)`. The lists are in `wow_data.py` and are short on purpose; Classic Era has no Bloodlust.
+- **Missing utility warning (optional, `/config buffs`).** Once 8 or more people are in and none of them can provide it, the post says `No Bloodlust yet (Shaman, Mage, Evoker, Hunter)` or `No a battle res yet (...)`. The lists are in `wow_data.py` and are short on purpose; Classic Era, Season of Discovery and WoW: Forever have no Bloodlust.
 - **New-version notice (optional, `/config updatenotice`).** About once a day the bot asks GitHub for the newest release and says so **once per version** in the log channel, with a link. GitHub only sees a request from your computer; nothing about your server is sent. `/status` then also shows the latest version.
 - **Weekly digest (optional, `/config digest`).** Every Monday after 09:00 (server time) a summary of the last 7 days is posted in the log channel: raids, attended, no-shows, who had the most no-shows.
 - **Daily backup** of your data (the last 7 are kept). Each copy is checked right after it is made, and if the database is ever found damaged when the bot starts, it restores the newest healthy backup by itself and keeps the damaged file.
@@ -361,7 +361,7 @@ recommended; on Windows, `SETUP.bat` installs 3.12 for you if you don't have a s
 **Can I use it in more than one Discord server?** It's built for one server per bot. Run a second copy (in another folder, with
 its own bot token) for a second server.
 
-**Can I change the class and spec list?** Yes. Retail and Classic Era come built in. Edit `wow_data.py` to add or rename specs
+**Can I change the class and spec list?** Yes. Eight lists come built in (every WoW version above). Edit `wow_data.py` to add or rename specs
 (for example when a patch adds one).
 
 **How do I get class icons?** They're not included, because the artwork belongs to Blizzard. Without them the bot uses coloured
@@ -446,7 +446,7 @@ save the file, and restart the bot.
 | `DISCORD_TOKEN` | The bot's password. **Never share it or commit it.** `.env` is git-ignored |
 | `GUILD_ID` | Your server's ID. Optional: blank + bot in one server = it picks that one |
 | `TIMEZONE` | Default timezone (`/config timezone` overrides it per server) |
-| `WOW_VERSION` | `retail` or `classic_era` (the class/spec list) |
+| `WOW_VERSION` | the class/spec list: `retail`, `classic_era` (also Hardcore), `season_of_discovery`, `tbc_classic`, `wrath_classic`, `cata_classic`, `mists_classic` or `wow_forever` |
 | `REMINDER_MINUTES` | Default reminder lead time (`/config reminder` overrides it) |
 
 ## Updating
@@ -488,7 +488,7 @@ python tests/run_all.py          # every suite, offline, no Discord token needed
 | `bot.py` | Commands, buttons, background loops |
 | `db.py` | SQLite layer and migrations (older databases upgrade on startup) |
 | `embeds.py` | Builds the raid post |
-| `wow_data.py` | Class/spec/role data (Retail and Classic Era presets) |
+| `wow_data.py` | Class/spec/role data (a preset for each WoW version) |
 | `checks.py` | Startup and setup checks against Discord (standard library only) |
 | `setup.py` / `SETUP.bat` / `start.bat` | The one-click setup and launcher |
 | `Update.bat` / `update.ps1` | One-click updater (downloads the latest release, keeps your settings and data) |

@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.11.0
+"Accountability".
+- **Automatic no-shows from a voice channel (optional).** `/config voicechannel` (or `/config channel voice:` per raid team) names the channel where your raiders gather. Fifteen minutes after a raid starts (change it with `minutes`), anyone signed up as **in** who isn't in that channel is marked as a no-show, and the result goes to the log channel. Safeguards: if nobody is in the channel the check is skipped; people marked **late**, benched or tentative are never checked; only raids that started in the last 6 hours are looked at, so turning it on never changes old attendance; and `/raid noshow` (undo: True) reverses any mark.
+- **Class limits.** `/raid create classes: Mage 4, Warlock 2` limits how many of a class can be in; the rest go on the bench and move in when a spot opens, with their place in line ("#1 in line for a Mage slot"). The post's footer shows how many of each limited class are in. `/raid edit classes:` changes or removes them (`off`), and templates, `/raid copy` and repeating raids keep them.
+- **Missing-utility warnings (optional, `/config buffs`).** Once 8 or more people are in and none of them can provide Bloodlust or a battle res, the post says so. The class lists are in `wow_data.py` (Classic Era has no Bloodlust).
+- **`/stats export`:** attendance as a spreadsheet (CSV) for officers: Discord id, name, signups, attended, late, no-shows, declined and the show-up percentage. Names that start with `=`, `+`, `-` or `@` are neutralised so a spreadsheet can't run them as formulas.
+- **Weekly digest (optional, `/config digest`):** every Monday after 09:00 (server time), a summary of the last 7 days in the log channel.
+- Tests: new `tests/test_v111.py`.
+
 ## 1.10.0
 "Faster for players".
 - **One-click sign-up.** Press **Sign Up** and the top button signs you up as the character you used last time (your main the first time). The prompt also tells you your current status. Choosing another character or class still works the same way.

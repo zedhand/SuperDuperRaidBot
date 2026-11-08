@@ -8,7 +8,7 @@ import urllib.error
 import urllib.request
 
 API = "https://discord.com/api/v10"
-USER_AGENT = "DiscordBot (https://github.com/zedhand/SuperDuperRaidBot, 1.10.0)"  # Discord blocks the default Python UA
+USER_AGENT = "DiscordBot (https://github.com/zedhand/SuperDuperRaidBot, 1.11.0)"  # Discord blocks the default Python UA
 
 # View Channels + Send Messages + Embed Links + Read Message History + Use External Emojis
 # + Create Public Threads + Send Messages in Threads (for the optional per-raid discussion threads)

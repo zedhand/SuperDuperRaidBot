@@ -2,6 +2,7 @@
 import discord
 
 import wow_data as wd
+from db import caps_dict, waiting_key
 
 ZWS = "​"  # zero-width space: lets a field have an "empty" name
 
@@ -71,18 +72,28 @@ def composition_warnings(event, attending) -> list[str]:
     return notes
 
 
-def build_embed(event, signups, locked: bool) -> discord.Embed:
+def utility_warnings(attending) -> list[str]:
+    """Notes like 'No Bloodlust yet (Shaman, Mage, ...)' for a group big enough to care. Only used when an admin
+    has turned on /config buffs; which classes provide what lives in wow_data.UTILITY."""
+    if len(attending) < wd.UTILITY_MIN_ATTENDING:
+        return []
+    have = {s["wow_class"] for s in attending}
+    return [f"No {label} yet ({', '.join(classes)})"
+            for label, classes in wd.UTILITY.values() if not have & set(classes)]
+
+
+def build_embed(event, signups, locked: bool, buffs: bool = False) -> discord.Embed:
     """The raid post. Roster fields are shortened as far as needed to keep the whole embed under
     Discord's 6000-character limit, so a long description plus a full roster can't make it fail."""
     limit = 1024
-    embed = _build(event, signups, locked, limit)
+    embed = _build(event, signups, locked, limit, buffs)
     while len(embed) > EMBED_BUDGET and limit > 120:
         limit = int(limit * 0.8)
-        embed = _build(event, signups, locked, limit)
+        embed = _build(event, signups, locked, limit, buffs)
     return embed
 
 
-def _build(event, signups, locked: bool, limit: int) -> discord.Embed:
+def _build(event, signups, locked: bool, limit: int, buffs: bool = False) -> discord.Embed:
     ts = event["start_ts"]
     num = _number_map(signups)
     embed = discord.Embed(title=_clip(event["title"], TITLE_MAX),
@@ -123,7 +134,7 @@ def _build(event, signups, locked: bool, limit: int) -> discord.Embed:
 
     # Composition warnings (only while signups are open)
     if not locked:
-        warnings = composition_warnings(event, attending)
+        warnings = composition_warnings(event, attending) + (utility_warnings(attending) if buffs else [])
         if warnings:
             embed.add_field(name=ZWS, value="\n".join(f"⚠️ {w}" for w in warnings), inline=False)
 
@@ -132,18 +143,25 @@ def _build(event, signups, locked: bool, limit: int) -> discord.Embed:
                                 ("tentative", "❔", "Tentative"), ("absent", "❌", "Absence")):
         rows = [s for s in signups if s["status"] == status]
         queue = {}
-        if status == "bench":  # people the bot benched because a role was full: their place in line, per role
+        if status == "bench":  # people the bot benched because a role or class was full: their place in line
             place: dict[str, int] = {}
             for s in rows:
                 if s["bench_from"] and s["role"]:
-                    place[s["role"]] = place.get(s["role"], 0) + 1
-                    queue[s["user_id"]] = f" (#{place[s['role']]} {s['role']})"
+                    key = waiting_key(event, signups, s)
+                    place[key] = place.get(key, 0) + 1
+                    queue[s["user_id"]] = f" (#{place[key]} {key})"
         if rows:
             embed.add_field(name=ZWS, value=_oneline(icon, label, rows, num, limit, queue), inline=False)
 
     footer = f"Event #{event['id']}"
     if event["cap_dps"]:
         footer += f" • DPS {dps_total}/{event['cap_dps']}"
+    caps = caps_dict(event["class_caps"])
+    if caps:
+        have = {}
+        for s in attending:
+            have[s["wow_class"]] = have.get(s["wow_class"], 0) + 1
+        footer += " • " + ", ".join(f"{c} {have.get(c, 0)}/{n}" for c, n in sorted(caps.items()))
     if event["repeat_days"]:
         footer += " • 🔁 " + {7: "weekly", 14: "every 2 weeks"}.get(event["repeat_days"], f"every {event['repeat_days']} days")
     embed.set_footer(text=footer)

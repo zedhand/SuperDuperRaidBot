@@ -83,7 +83,39 @@ MIGRATIONS = (
     ("signups", "no_show", "INTEGER NOT NULL DEFAULT 0"),     # v1.8: signed up but didn't turn up
     ("events", "autoclosed", "INTEGER NOT NULL DEFAULT 0"),   # v1.9: the automatic sign-up closing has run
     ("events", "series_id", "INTEGER NOT NULL DEFAULT 0"),    # v1.10: which repeating series a raid belongs to
+    ("events", "voice_checked", "INTEGER NOT NULL DEFAULT 0"),  # v1.11: the voice-channel attendance check has run
+    ("events", "class_caps", "TEXT NOT NULL DEFAULT ''"),     # v1.11: per-class limits, e.g. "Mage:4,Warlock:2"
+    ("templates", "class_caps", "TEXT NOT NULL DEFAULT ''"),  # v1.11
 )
+
+
+def caps_dict(text: str | None) -> dict[str, int]:
+    """'Mage:4,Warlock:2' -> {'Mage': 4, 'Warlock': 2} (per-class limits stored on a raid)."""
+    out = {}
+    for part in (text or "").split(","):
+        name, _, n = part.partition(":")
+        if name.strip() and n.strip().isdigit() and int(n) > 0:
+            out[name.strip()] = int(n)
+    return out
+
+
+def caps_text(caps: dict[str, int]) -> str:
+    return ",".join(f"{k}:{v}" for k, v in sorted(caps.items()) if v > 0)
+
+
+def waiting_key(event, signups, s) -> str:
+    """What a benched person is waiting for: their role ('tank', 'healer', 'dps') if that role is full,
+    else their class if the raid limits that class. Used for places in line."""
+    attending = [a for a in signups if a["status"] in ("in", "late")]
+    role = s["role"]
+    cap = event[f"cap_{role}"]
+    if cap and sum(1 for a in attending if a["role"] == role) >= cap:
+        return role
+    caps = caps_dict(event["class_caps"])
+    cls = s["wow_class"]
+    if cls in caps and sum(1 for a in attending if a["wow_class"] == cls) >= caps[cls]:
+        return cls
+    return role
 
 
 class DatabaseCorrupt(Exception):
@@ -180,12 +212,12 @@ class DB:
 
     # ---- events ----
     def create_event(self, guild_id, channel_id, title, description, start_ts, creator_id,
-                     cap_tank, cap_healer, cap_dps, repeat_days=0):
+                     cap_tank, cap_healer, cap_dps, repeat_days=0, class_caps=""):
         return self._run(
             "INSERT INTO events(guild_id,channel_id,title,description,start_ts,creator_id,"
-            "cap_tank,cap_healer,cap_dps,repeat_days) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "cap_tank,cap_healer,cap_dps,repeat_days,class_caps) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             (guild_id, channel_id, title, description, start_ts, creator_id,
-             cap_tank, cap_healer, cap_dps, repeat_days)).lastrowid
+             cap_tank, cap_healer, cap_dps, repeat_days, class_caps)).lastrowid
 
     def set_message_id(self, event_id, message_id):
         self._run("UPDATE events SET message_id=? WHERE id=?", (message_id, event_id))
@@ -214,7 +246,7 @@ class DB:
 
     def update_event(self, event_id, **fields):
         allowed = {"title", "description", "start_ts", "cap_tank", "cap_healer", "cap_dps", "reminded",
-                   "lock_shown", "repeat_days", "repeated", "thread_id", "archived", "nudged", "autoclosed", "series_id"}
+                   "lock_shown", "repeat_days", "repeated", "thread_id", "archived", "nudged", "autoclosed", "series_id", "voice_checked", "class_caps"}
         fields = {k: v for k, v in fields.items() if k in allowed}
         if fields:
             # column names are filtered through the allow-list above, values are bound parameters
@@ -301,20 +333,45 @@ class DB:
     def remove_signup(self, event_id, user_id):
         self._run("DELETE FROM signups WHERE event_id=? AND user_id=?", (event_id, user_id))
 
+    def count_class(self, event_id, wow_class, exclude_user):
+        return self._one(
+            "SELECT COUNT(*) c FROM signups WHERE event_id=? AND wow_class=? AND status IN ('in','late') "
+            "AND user_id!=?", (event_id, wow_class, exclude_user))["c"]
+
+    def pending_voicecheck(self, now, window=6 * 3600):
+        """Raids that started in the last `window` seconds and haven't had their voice check. Caller applies the
+        grace period and the settings."""
+        return self._all("SELECT * FROM events WHERE voice_checked=0 AND message_id!=0 AND start_ts<=? AND start_ts>?",
+                         (now, now - window))
+
+    def raids_between(self, guild_id, since_ts, until_ts):
+        return self._one("SELECT COUNT(*) c FROM events WHERE guild_id=? AND start_ts>=? AND start_ts<?",
+                         (guild_id, since_ts, until_ts))["c"]
+
+    def guilds_with_setting(self, key, value):
+        return [r["guild_id"] for r in self._all("SELECT guild_id FROM settings WHERE key=? AND value=?", (key, value))]
+
     def last_character_used(self, user_id):
         """The character this person most recently signed up with (any raid), or None."""
         return self._one("SELECT char_name, wow_class, spec, role FROM signups WHERE user_id=? AND char_name IS NOT NULL "
                          "AND role IS NOT NULL ORDER BY updated_ts DESC, rowid DESC LIMIT 1", (user_id,))
 
-    def bench_position(self, event_id, user_id):
-        """1-based place in line for a slot of their role among people the bot benched (first come, first
-        served), or None if they aren't waiting for a slot."""
+    def bench_wait(self, event_id, user_id):
+        """(place in line, what they wait for) for someone the bot benched because a role or class was full,
+        first come first served; None if they aren't waiting for a slot. 'What' is 'tank'/'healer'/'dps' or a class."""
         me = self.signup(event_id, user_id)
         if not me or me["status"] != "bench" or not me["bench_from"] or not me["role"]:
             return None
-        line = [s["user_id"] for s in self.signups(event_id)
-                if s["status"] == "bench" and s["bench_from"] and s["role"] == me["role"]]
-        return line.index(user_id) + 1
+        event, signups = self.event(event_id), self.signups(event_id)
+        key = waiting_key(event, signups, me)
+        line = [s["user_id"] for s in signups if s["status"] == "bench" and s["bench_from"] and s["role"]
+                and waiting_key(event, signups, s) == key]
+        return line.index(user_id) + 1, key
+
+    def bench_position(self, event_id, user_id):
+        """1-based place in line, or None if they aren't waiting for a slot."""
+        found = self.bench_wait(event_id, user_id)
+        return found[0] if found else None
 
     # ---- repeating-raid series ("always in") ----
     def join_series(self, guild_id, series_id, user_id, char_name, wow_class, spec, role):
@@ -348,13 +405,14 @@ class DB:
     def templates(self, guild_id):
         return self._all("SELECT * FROM templates WHERE guild_id=? ORDER BY name", (guild_id,))
 
-    def save_template(self, guild_id, name, title, description, cap_tank, cap_healer, cap_dps, repeat_days):
+    def save_template(self, guild_id, name, title, description, cap_tank, cap_healer, cap_dps, repeat_days,
+                      class_caps=""):
         self._run(
-            "INSERT INTO templates(guild_id,name,title,description,cap_tank,cap_healer,cap_dps,repeat_days) "
-            "VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(guild_id,name) DO UPDATE SET title=excluded.title, "
+            "INSERT INTO templates(guild_id,name,title,description,cap_tank,cap_healer,cap_dps,repeat_days,class_caps) "
+            "VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(guild_id,name) DO UPDATE SET title=excluded.title, "
             "description=excluded.description, cap_tank=excluded.cap_tank, cap_healer=excluded.cap_healer, "
-            "cap_dps=excluded.cap_dps, repeat_days=excluded.repeat_days",
-            (guild_id, name, title, description, cap_tank, cap_healer, cap_dps, repeat_days))
+            "cap_dps=excluded.cap_dps, repeat_days=excluded.repeat_days, class_caps=excluded.class_caps",
+            (guild_id, name, title, description, cap_tank, cap_healer, cap_dps, repeat_days, class_caps))
 
     def delete_template(self, guild_id, name):
         return self._run("DELETE FROM templates WHERE guild_id=? AND name=?", (guild_id, name)).rowcount > 0

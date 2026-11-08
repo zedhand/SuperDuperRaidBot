@@ -53,10 +53,25 @@ CLASSIC_ERA = {
 
 PRESETS = {"retail": RETAIL, "classic_era": CLASSIC_ERA}
 
+# Utility a raid usually wants. Shown as a warning on the post (only if an admin turns it on with /config buffs)
+# when nobody who can provide it has signed up. {key: (what to call it, classes that provide it)}.
+# Deliberately short and certain; edit it when the game changes. Classic Era has no Bloodlust.
+UTILITY_BY_PRESET = {
+    "retail": {
+        "bloodlust": ("Bloodlust", ("Shaman", "Mage", "Evoker", "Hunter")),
+        "battle_res": ("a battle res", ("Druid", "Death Knight", "Warlock", "Paladin")),
+    },
+    "classic_era": {
+        "battle_res": ("a battle res", ("Druid",)),
+    },
+}
+UTILITY_MIN_ATTENDING = 8  # smaller groups aren't nagged about utility
+
 _name = (os.getenv("WOW_VERSION") or "retail").strip().lower()
 if _name not in PRESETS:
     raise SystemExit(f"Unknown WOW_VERSION '{_name}'. Options: {', '.join(PRESETS)}")
 DATA = PRESETS[_name]
+UTILITY = UTILITY_BY_PRESET.get(_name, {})
 
 
 def class_names() -> list[str]:

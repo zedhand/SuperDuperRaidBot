@@ -1,5 +1,6 @@
 """Single-guild raid signup bot (a small Raid-Helper alternative)."""
 import asyncio
+import csv
 import io
 import logging
 import logging.handlers
@@ -22,7 +23,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
-VERSION = "1.10.0"
+VERSION = "1.11.0"
 WINDOWS = os.name == "nt"  # only used to word messages for the person reading them
 BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / ".env"  # always the .env next to bot.py, whatever folder you launch from
@@ -30,7 +31,7 @@ load_dotenv(ENV_PATH)
 
 import checks  # noqa: E402
 import wow_data as wd  # noqa: E402  # noqa: E402  (after load_dotenv so WOW_VERSION is read)
-from db import open_database  # noqa: E402
+from db import caps_dict, caps_text, open_database  # noqa: E402
 from embeds import build_embed, text_problem  # noqa: E402
 
 def _env_int(name: str, default: int) -> int:
@@ -171,6 +172,11 @@ def may_sign_up(interaction: discord.Interaction) -> bool:
     return any(r.id == role_id for r in getattr(interaction.user, "roles", []))
 
 
+def render_embed(event, signups, locked: bool):
+    """The raid post, with the optional missing-utility warnings if /config buffs is on."""
+    return build_embed(event, signups, locked, buffs=db.setting(event["guild_id"], "buffs") == "1")
+
+
 def autoclose_inside(guild_id: int, start_ts: int) -> bool:
     """True if a raid starting at start_ts is already inside the /config autoclose window."""
     hours = int_setting(guild_id, "autoclose_hours")
@@ -178,14 +184,18 @@ def autoclose_inside(guild_id: int, start_ts: int) -> bool:
 
 
 def queue_note(event_id: int, user_id: int) -> str:
-    """' You're #2 in line for a tank slot.' for someone the bot benched because a role was full, else ''."""
-    pos = db.bench_position(event_id, user_id)
-    role = (db.signup(event_id, user_id) or {"role": None})["role"]
-    return f" You're #{pos} in line for a {wd.ROLE_SINGULAR[role].lower()} slot." if pos and role else ""
+    """' You're #2 in line for a tank slot.' for someone the bot benched because a role or class was full, else ''."""
+    waiting = db.bench_wait(event_id, user_id)
+    if not waiting:
+        return ""
+    pos, key = waiting
+    word = wd.ROLE_SINGULAR[key].lower() if key in wd.ROLE_SINGULAR else key
+    return f" You're #{pos} in line for a {word} slot."
 
 
-def apply_cap(event, user_id: int, role: str, status: str) -> tuple[str, str | None]:
-    """Counted statuses ('in', 'late') overflow to the bench when their role is full.
+def apply_cap(event, user_id: int, role: str, status: str, wow_class: str | None = None) -> tuple[str, str | None]:
+    """Counted statuses ('in', 'late') overflow to the bench when their role is full, or when the raid limits
+    their class (/raid create classes:) and that class is full.
 
     Returns (status, bench_from). bench_from remembers what they asked for so the bot can
     promote them if a slot opens up."""
@@ -193,7 +203,46 @@ def apply_cap(event, user_id: int, role: str, status: str) -> tuple[str, str | N
         cap = event[f"cap_{role}"]
         if cap and db.count_role(event["id"], role, user_id) >= cap:
             return "bench", status
+        caps = caps_dict(event["class_caps"])
+        if wow_class and wow_class in caps and db.count_class(event["id"], wow_class, user_id) >= caps[wow_class]:
+            return "bench", status
     return status, None
+
+
+def bench_reason(event, user_id: int, role: str, wow_class: str | None) -> str:
+    """Why someone was benched, for the reply: 'Tank slots are full' or 'only 2 Mages are allowed'."""
+    cap = event[f"cap_{role}"]
+    if cap and db.count_role(event["id"], role, user_id) >= cap:
+        return f"{wd.ROLE_SINGULAR[role]} slots are full"
+    caps = caps_dict(event["class_caps"])
+    if wow_class in caps:
+        return f"only {caps[wow_class]} {wow_class} {'is' if caps[wow_class] == 1 else 'are'} allowed"
+    return f"{wd.ROLE_SINGULAR[role]} slots are full"
+
+
+def parse_class_caps(text: str | None) -> tuple[str, str | None]:
+    """'Mage 4, Warlock 2' (or 'Mage:4') -> ('Mage:4,Warlock:2', None); 'off' -> ('', None); bad input -> ('', why)."""
+    t = (text or "").strip()
+    if t.lower() in ("", "off", "none", "no", "clear", "0"):
+        return "", None
+    caps: dict[str, int] = {}
+    for part in re.split(r"[,;]", t):
+        part = part.strip()
+        if not part:
+            continue
+        m = re.fullmatch(r"([A-Za-z][A-Za-z ]*?)\s*[: ]\s*(\d{1,2})", part) or re.fullmatch(r"(\d{1,2})\s+([A-Za-z][A-Za-z ]*)", part)
+        if not m:
+            return "", f"I couldn't read `{part}`. Write class limits like `Mage 4, Warlock 2` (or `off`)."
+        first, second = m.groups()
+        name, n = (first, second) if first[0].isalpha() else (second, first)
+        cls = wd.find_class(name)
+        if not cls:
+            return "", f"I don't know the class `{name.strip()}`. Options: {', '.join(wd.class_names())}"
+        if int(n) > 40:
+            return "", "A class limit can be at most 40."
+        if int(n) > 0:
+            caps[cls] = int(n)
+    return caps_text(caps), None
 
 
 async def promote_bench(event_id: int) -> None:
@@ -206,6 +255,9 @@ async def promote_bench(event_id: int) -> None:
             continue
         cap = event[f"cap_{s['role']}"]
         if cap and db.count_role(event_id, s["role"], s["user_id"]) >= cap:
+            continue
+        class_cap = caps_dict(event["class_caps"]).get(s["wow_class"])
+        if class_cap and db.count_class(event_id, s["wow_class"], s["user_id"]) >= class_cap:
             continue
         db.set_signup(event_id, s["user_id"], s["char_name"], s["wow_class"], s["spec"], s["role"], s["bench_from"])
         text = f"🎉 A {wd.ROLE_SINGULAR[s['role']].lower()} slot opened up. You're off the bench for **{event['title']}**!"
@@ -278,7 +330,7 @@ async def _redraw(event_id: int) -> bool:
         except discord.HTTPException:
             return False
     locked = is_locked(event)
-    embed = build_embed(event, db.signups(event_id), locked)
+    embed = render_embed(event, db.signups(event_id), locked)
     try:
         await channel.get_partial_message(event["message_id"]).edit(
             embed=embed, view=ClosedView() if locked else RaidView())
@@ -319,9 +371,9 @@ async def finish_signup(interaction: discord.Interaction, event_id: int, name: s
     event = db.event(event_id)
     if not event or is_locked(event):
         return await interaction.response.edit_message(content="Signups are closed.", view=None)
-    status, bench_from = apply_cap(event, interaction.user.id, role, "in")
+    status, bench_from = apply_cap(event, interaction.user.id, role, "in", cls)
     db.set_signup(event_id, interaction.user.id, name, cls, spec, role, status, bench_from)
-    note = "" if status == "in" else f" ({wd.ROLE_SINGULAR[role]} slots are full, so you were put on the bench)"
+    note = "" if status == "in" else f" ({bench_reason(event, interaction.user.id, role, cls)}, so you were put on the bench)"
     await interaction.response.edit_message(
         content=f"Signed up as **{name}** — {spec} {cls} ({wd.ROLE_LABEL[role]}){note}.{queue_note(event_id, interaction.user.id)}",
         view=None)
@@ -445,7 +497,7 @@ class RaidView(discord.ui.View):
                 return await interaction.response.send_message(
                     "Press **Sign Up** first to choose your class and spec (or save a character "
                     "with `/character add`), then you can use this button.", ephemeral=True)
-            status, bench_from = apply_cap(event, uid, row["role"], status)
+            status, bench_from = apply_cap(event, uid, row["role"], status, row["wow_class"])
             db.set_signup(event["id"], uid, row["char_name"], row["wow_class"], row["spec"],
                           row["role"], status, bench_from)
         await interaction.response.send_message(
@@ -823,11 +875,11 @@ def threads_default(guild_id: int) -> bool:
 
 async def post_event(channel, guild, creator_id: int, title: str, description: str, ts: int,
                      tanks: int, healers: int, dps: int, ping=None, repeat_days: int = 0,
-                     thread: bool = False, series_id: int = 0):
+                     thread: bool = False, series_id: int = 0, class_caps: str = ""):
     """Create the event row and its post. Returns (event_id, message, notes). Raises HTTPException
     (and leaves nothing behind) if the post itself can't be sent."""
     event_id = db.create_event(guild.id, channel.id, title, description, ts, creator_id,
-                               tanks, healers, dps, repeat_days)
+                               tanks, healers, dps, repeat_days, class_caps)
     if series_id or repeat_days:  # a repeating raid starts a series; each next one carries the same series id
         db.update_event(event_id, series_id=series_id or event_id)
     event = db.event(event_id)
@@ -838,7 +890,7 @@ async def post_event(channel, guild, creator_id: int, title: str, description: s
     else:
         mentions = discord.AllowedMentions.none()
     try:
-        msg = await channel.send(content=ping.mention if ping else None, embed=build_embed(event, [], False),
+        msg = await channel.send(content=ping.mention if ping else None, embed=render_embed(event, [], False),
                                  view=RaidView(), allowed_mentions=mentions)
     except discord.HTTPException:
         db.delete_event(event_id)
@@ -891,7 +943,8 @@ async def template_autocomplete(interaction: discord.Interaction, current: str):
                        description="Extra info (optional)", tanks="Max tanks (0 = no limit)",
                        healers="Max healers (0 = no limit)", dps="Max DPS (0 = no limit)",
                        ping="Role to ping (default: this channel's, category's or the server's ping role)",
-                       repeat="Post the next one automatically", thread="Start a discussion thread under the post")
+                       repeat="Post the next one automatically", thread="Start a discussion thread under the post",
+                       classes="Limit classes, e.g. Mage 4, Warlock 2 (off = no limits)")
 @app_commands.choices(repeat=REPEAT_CHOICES)
 @app_commands.autocomplete(template=template_autocomplete, date=date_autocomplete)
 async def raid_create(interaction: discord.Interaction, date: str, at: Optional[str] = None,
@@ -901,7 +954,8 @@ async def raid_create(interaction: discord.Interaction, date: str, at: Optional[
                       healers: Optional[app_commands.Range[int, 0, 40]] = None,
                       dps: Optional[app_commands.Range[int, 0, 40]] = None,
                       ping: Optional[discord.Role] = None,
-                      repeat: Optional[app_commands.Choice[int]] = None, thread: Optional[bool] = None):
+                      repeat: Optional[app_commands.Choice[int]] = None, thread: Optional[bool] = None,
+                      classes: Optional[str] = None):
     if not can_manage_channel(interaction, interaction.channel):
         return await interaction.response.send_message(
             "You can only post raids in channels you're an officer for. Run this in your own signup channel.",
@@ -922,6 +976,11 @@ async def raid_create(interaction: discord.Interaction, date: str, at: Optional[
         return await interaction.response.send_message("That time is in the past.", ephemeral=True)
     if problem := text_problem(title, description):
         return await interaction.response.send_message(problem, ephemeral=True)
+    caps_value = tpl["class_caps"] if (tpl and classes is None) else ""
+    if classes is not None:
+        caps_value, problem = parse_class_caps(classes)
+        if problem:
+            return await interaction.response.send_message(problem, ephemeral=True)
 
     def pick(value, key, default=0):
         return value if value is not None else (tpl[key] if tpl else default)
@@ -935,7 +994,7 @@ async def raid_create(interaction: discord.Interaction, date: str, at: Optional[
             description if description is not None else (tpl["description"] if tpl else ""), ts,
             pick(tanks, "cap_tank"), pick(healers, "cap_healer"), pick(dps, "cap_dps"), ping=ping,
             repeat_days=repeat.value if repeat is not None else pick(None, "repeat_days"),
-            thread=thread if thread is not None else threads_default(interaction.guild_id))
+            thread=thread if thread is not None else threads_default(interaction.guild_id), class_caps=caps_value)
     except discord.HTTPException:
         return await interaction.followup.send(
             "I couldn't post in this channel. Give the bot View Channel, Send Messages and Embed Links here.",
@@ -971,7 +1030,7 @@ async def raid_copy(interaction: discord.Interaction, event_id: int, date: str, 
             channel, interaction.guild, interaction.user.id, title or event["title"], event["description"], ts,
             event["cap_tank"], event["cap_healer"], event["cap_dps"],
             ping=interaction.guild.get_role(default_ping) if default_ping else None,
-            thread=threads_default(interaction.guild_id))
+            thread=threads_default(interaction.guild_id), class_caps=event["class_caps"])
     except discord.HTTPException:
         return await interaction.followup.send("I couldn't post in that channel.", ephemeral=True)
     await audit(interaction.guild_id, f"📋 {interaction.user.mention} copied **{event['title']}** (#{event_id}) to #{new_id}")
@@ -1007,7 +1066,7 @@ async def seed_series(event_id: int, series_id: int) -> None:
         return
     event = db.event(event_id)
     for m in members:
-        status, bench_from = apply_cap(event, m["user_id"], m["role"], "in")
+        status, bench_from = apply_cap(event, m["user_id"], m["role"], "in", m["wow_class"])
         db.set_signup(event_id, m["user_id"], m["char_name"], m["wow_class"], m["spec"], m["role"], status, bench_from)
     await refresh_message(event_id)
 
@@ -1038,7 +1097,8 @@ async def spawn_next(event) -> bool:
             channel, channel.guild, event["creator_id"], event["title"], event["description"],
             int(nxt.timestamp()), event["cap_tank"], event["cap_healer"], event["cap_dps"],
             ping=channel.guild.get_role(role_id) if role_id else None,
-            repeat_days=event["repeat_days"], thread=threads_default(event["guild_id"]), series_id=series)
+            repeat_days=event["repeat_days"], thread=threads_default(event["guild_id"]), series_id=series,
+            class_caps=event["class_caps"])
         log.info("Posted the next occurrence of recurring raid #%s", event["id"])
         try:
             await seed_series(new_id, series)
@@ -1071,7 +1131,7 @@ async def template_save(interaction: discord.Interaction, name: str, event_id: i
             "A template with that name already exists, and templates are shared by the whole server. "
             "Pick another name, or ask a server-wide officer to replace it.", ephemeral=True)
     db.save_template(interaction.guild_id, name, event["title"], event["description"], event["cap_tank"],
-                     event["cap_healer"], event["cap_dps"], event["repeat_days"])
+                     event["cap_healer"], event["cap_dps"], event["repeat_days"], event["class_caps"])
     await interaction.response.send_message(
         f"Saved template **{name}**. Use it with `/raid create template: {name}` (just the date and time).",
         ephemeral=True)
@@ -1087,7 +1147,8 @@ async def template_list(interaction: discord.Interaction):
     for t in rows:
         caps = "/".join(str(t[k]) if t[k] else "any" for k in ("cap_tank", "cap_healer", "cap_dps"))
         rep = {7: " 🔁 weekly", 14: " 🔁 every 2 weeks"}.get(t["repeat_days"], "")
-        lines.append(f"**{t['name']}**: {t['title']} (tanks/healers/dps {caps}){rep}")
+        by_class = ", ".join(f"{c} {n}" for c, n in sorted(caps_dict(t["class_caps"]).items()))
+        lines.append(f"**{t['name']}**: {t['title']} (tanks/healers/dps {caps}){rep}" + (f" · max {by_class}" if by_class else ""))
     await interaction.response.send_message("\n".join(lines)[:2000], ephemeral=True)
 
 
@@ -1107,13 +1168,15 @@ async def template_delete(interaction: discord.Interaction, name: str):
 @app_commands.describe(title="New title", description="New description", date="New day: " + DATE_HELP[5:],
                        at="New time, e.g. 20:00 or 8pm", tanks="New tank limit (0 = no limit)",
                        healers="New healer limit (0 = no limit)", dps="New DPS limit (0 = no limit)",
-                       notify="If the time changed, tell everyone who signed up (default yes)")
+                       notify="If the time changed, tell everyone who signed up (default yes)",
+                       classes="New class limits, e.g. Mage 4, Warlock 2 (off = no limits)")
 @app_commands.autocomplete(event_id=event_autocomplete, date=date_autocomplete)
 async def raid_edit(interaction: discord.Interaction, event_id: int, title: Optional[str] = None,
                     description: Optional[str] = None, date: Optional[str] = None,
                     at: Optional[str] = None, tanks: Optional[app_commands.Range[int, 0, 40]] = None,
                     healers: Optional[app_commands.Range[int, 0, 40]] = None,
-                    dps: Optional[app_commands.Range[int, 0, 40]] = None, notify: bool = True):
+                    dps: Optional[app_commands.Range[int, 0, 40]] = None, notify: bool = True,
+                    classes: Optional[str] = None):
     event = await _get_event(interaction, event_id)
     if not event:
         return await interaction.response.send_message("Event not found.", ephemeral=True)
@@ -1127,6 +1190,10 @@ async def raid_edit(interaction: discord.Interaction, event_id: int, title: Opti
     for key, val in (("cap_tank", tanks), ("cap_healer", healers), ("cap_dps", dps)):
         if val is not None:
             fields[key] = val
+    if classes is not None:
+        fields["class_caps"], problem = parse_class_caps(classes)
+        if problem:
+            return await interaction.response.send_message(problem, ephemeral=True)
     time_changed = False
     if date or at:
         ts, problem = parse_start_checked(interaction.guild_id, date or "", at, base_ts=event["start_ts"])
@@ -1251,11 +1318,11 @@ async def raid_add(interaction: discord.Interaction, event_id: int, member: disc
             return await interaction.response.send_message(
                 f"{member.display_name} has no saved character. Give a `wowclass` and `spec`, or ask them to use "
                 "`/character add`.", ephemeral=True)
-        final, bench_from = apply_cap(event, member.id, row["role"], st)
+        final, bench_from = apply_cap(event, member.id, row["role"], st, row["wow_class"])
         db.set_signup(event_id, member.id, row["char_name"], row["wow_class"], row["spec"], row["role"], final, bench_from)
         text = f"{member.mention} is now **{final}** for **{event['title']}** as **{row['char_name']}** — {row['spec']} {row['wow_class']}."
         if final != st:
-            text += f" ({wd.ROLE_SINGULAR[row['role']]} slots are full, so they went on the bench.)"
+            text += f" ({bench_reason(event, member.id, row['role'], row['wow_class'])}, so they went on the bench.)"
     await audit(interaction.guild_id, f"➕ {interaction.user.mention} set {member.mention} to {final} for **{event['title']}** (#{event_id})")
     await interaction.response.send_message(text, ephemeral=True, allowed_mentions=quiet)
     await update_event(event_id)
@@ -1476,6 +1543,102 @@ async def _run_autoclose(now: int) -> None:
             db.update_event(event["id"], autoclosed=1)
 
 
+def scoped_setting(guild_id: int, channel, key: str) -> str | None:
+    """A setting for this channel, else its category, else the server-wide one (same order as the ping role)."""
+    for cid in _scope_ids(channel):
+        value = db.setting(guild_id, f"{key}@{cid}")
+        if value:
+            return value
+    return db.setting(guild_id, key)
+
+
+def voice_channel_id(guild_id: int, channel) -> int | None:
+    value = scoped_setting(guild_id, channel, "voice_channel")
+    try:
+        return int(value) if value else None
+    except ValueError:
+        return None
+
+
+async def _voicecheck_one(event, now: int):
+    """Some time after the start: anyone signed up as 'in' who isn't in the raid's voice channel is marked as a
+    no-show (officers can undo with /raid noshow undo: true). Skipped if nobody at all is in the channel, since
+    the raid is probably being run somewhere else."""
+    g = event["guild_id"]
+    if now < event["start_ts"] + int_setting(g, "voice_check_minutes", 15) * 60:
+        return WAIT
+    channel = bot.get_channel(event["channel_id"])
+    vid = voice_channel_id(g, channel) if channel else voice_channel_id(g, None)
+    if not vid:
+        return True  # the feature is off: nothing to do, and don't act retroactively if it is turned on later
+    voice = bot.get_channel(vid)
+    members = getattr(voice, "members", None)
+    if members is None:
+        return True
+    present = {m.id for m in members}
+    expected = [x for x in db.signups(event["id"]) if x["status"] == "in" and not x["no_show"]]
+    if not present:
+        await audit(g, f"🎙️ Voice check for **{event['title']}** (#{event['id']}) skipped: nobody was in <#{vid}>. "
+                       "Use `/raid noshow` if you want to mark people by hand.")
+        return True
+    missing = [x for x in expected if x["user_id"] not in present]
+    for x in missing:
+        db.set_no_show(event["id"], x["user_id"], True)
+    if missing:
+        await audit(g, f"🎙️ Voice check for **{event['title']}** (#{event['id']}): {len(expected) - len(missing)} of "
+                       f"{len(expected)} signed-up members were in <#{vid}>. Marked as no-shows: "
+                       + " ".join(f"<@{x['user_id']}>" for x in missing) + ". Undo with `/raid noshow` (undo: True).")
+    return True
+
+
+async def _run_voicecheck(now: int) -> None:
+    for event in db.pending_voicecheck(now):
+        if await _attempt("voicecheck", event["id"], partial(_voicecheck_one, event, now)):
+            db.update_event(event["id"], voice_checked=1)
+
+
+def _name(guild, uid: int) -> str:
+    member = guild.get_member(uid) if guild else None
+    return member.display_name if member else f"<@{uid}>"
+
+
+async def _digest_one(guild_id: int, now: int):
+    """The optional weekly attendance summary, posted in the log channel."""
+    log_id = int_setting(guild_id, "log_channel")
+    channel = bot.get_channel(log_id) if log_id else None
+    if channel is None:
+        return True  # nowhere to post it: give up for this week
+    rows = db.stats(guild_id, now - 7 * 86400, now)
+    raids = db.raids_between(guild_id, now - 7 * 86400, now)
+    guild = getattr(channel, "guild", None)
+    lines = [f"📊 **Weekly attendance** (last 7 days): {raids} raid{'s' if raids != 1 else ''}"
+             f" · {sum(r['attended'] for r in rows)} attended · {sum(r['no_show'] for r in rows)} no-shows"]
+    flakes = sorted((r for r in rows if r["no_show"]), key=lambda r: (-r["no_show"], r["user_id"]))[:5]
+    if flakes:
+        lines.append("Most no-shows: " + ", ".join(f"{_name(guild, r['user_id'])} ({r['no_show']})" for r in flakes))
+    solid = [r for r in rows if r["attended"] and not r["no_show"]][:3]
+    if solid:
+        lines.append("Most attended, no no-shows: " + ", ".join(f"{_name(guild, r['user_id'])} ({r['attended']})" for r in solid))
+    if not rows:
+        lines.append("No signups on raids that started this week.")
+    try:
+        await channel.send("\n".join(lines)[:2000], allowed_mentions=discord.AllowedMentions.none())
+    except discord.HTTPException as err:
+        log.warning("Weekly digest failed for guild %s: %s", guild_id, err)
+        return False
+    return True
+
+
+async def _run_digest(now: int) -> None:
+    for g in db.guilds_with_setting("digest", "1"):
+        local = datetime.fromtimestamp(now, guild_tz(g))
+        week = f"{local.isocalendar()[0]}-W{local.isocalendar()[1]:02d}"
+        if db.setting(g, "digest_last") == week or (local.weekday() == 0 and local.hour < 9):
+            continue  # already posted this week, or it is Monday before 09:00
+        if await _attempt("digest", g, partial(_digest_one, g, now)):
+            db.set_setting(g, "digest_last", week)
+
+
 async def _run_locks(now: int) -> None:
     for event in db.due_lock(now):  # start time passed: show "This event is closed."
         if await _attempt("lock", event["id"], partial(refresh_message, event["id"])):
@@ -1509,7 +1672,8 @@ async def _run_nudges(now: int) -> None:
 @tasks.loop(minutes=1)
 async def reminder_loop():
     now = int(time.time())
-    for step in (_run_autoclose, _run_locks, _run_repeats, _run_archive, _run_reminders, _run_nudges):
+    for step in (_run_autoclose, _run_locks, _run_voicecheck, _run_repeats, _run_archive, _run_reminders, _run_nudges,
+                 _run_digest):
         try:
             await step(now)
         except Exception as e:  # e.g. a database error: log it, and still run the other steps
@@ -1610,6 +1774,34 @@ async def stats_team(interaction: discord.Interaction, days: app_commands.Range[
     await interaction.response.send_message(text, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
 
+def csv_safe(text: str) -> str:
+    """Stop a spreadsheet from treating a name that starts with = + - @ as a formula."""
+    return "'" + text if text[:1] in ("=", "+", "-", "@", "\t", "\r") else text
+
+
+@stats.command(name="export", description="Attendance as a spreadsheet file (officers only)")
+@app_commands.describe(days="How far back to look (default 90)")
+async def stats_export(interaction: discord.Interaction, days: app_commands.Range[int, 7, 730] = 90):
+    if not (is_officer(interaction) or holds_scoped_officer_role(interaction)):
+        return await interaction.response.send_message("Only raid officers can export attendance.", ephemeral=True)
+    now = int(time.time())
+    rows = db.stats(interaction.guild_id, now - days * 86400, now)
+    if not rows:
+        return await interaction.response.send_message("No finished raids with signups in that period.", ephemeral=True)
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow(["discord_id", "name", "signups", "attended", "late", "no_show", "declined", "showed_up_percent"])
+    for r in rows:
+        member = interaction.guild.get_member(r["user_id"])
+        done = r["attended"] + r["no_show"]
+        writer.writerow([r["user_id"], csv_safe(member.display_name) if member else "", r["total"], r["attended"],
+                         r["late"], r["no_show"], r["absent"], round(100 * r["attended"] / done) if done else ""])
+    data = ("\ufeff" + out.getvalue()).encode("utf-8")  # the BOM makes Excel read accented names correctly
+    await interaction.response.send_message(
+        f"Attendance for the last {days} days, {len(rows)} people. It has Discord ids and names, so keep it private.",
+        file=discord.File(io.BytesIO(data), filename=f"attendance-{days}d.csv"), ephemeral=True)
+
+
 @bot.tree.command(name="myraids", description="The upcoming raids you've answered, with links")
 @app_commands.guild_only()
 async def myraids(interaction: discord.Interaction):
@@ -1696,7 +1888,7 @@ async def always_join(interaction: discord.Interaction, event_id: int, character
     db.join_series(interaction.guild_id, series, uid, who["name"], who["wow_class"], who["spec"], who["role"])
     extra = ""
     if existing is None and not is_locked(event):
-        status, bench_from = apply_cap(event, uid, who["role"], "in")
+        status, bench_from = apply_cap(event, uid, who["role"], "in", who["wow_class"])
         db.set_signup(event_id, uid, who["name"], who["wow_class"], who["spec"], who["role"], status, bench_from)
         extra = f" You're {status} for **{event['title']}** now."
         await update_event(event_id)
@@ -1809,6 +2001,12 @@ async def config_show(interaction: discord.Interaction):
     autoclose = int_setting(g, "autoclose_hours")
     autoclose_text = f"{plural(autoclose, 'hour')} before the start" if autoclose else "off"
     lines.append(f"**Auto-close sign-ups:** {autoclose_text}")
+    voice = db.setting(g, "voice_channel")
+    voice_text = (f"<#{voice}>, {plural(int_setting(g, 'voice_check_minutes', 15), 'minute')} after the start"
+                  if voice else "off")
+    lines.append(f"**Voice attendance check:** {voice_text}")
+    lines.append(f"**Missing-utility warnings:** {'on' if db.setting(g, 'buffs') == '1' else 'off'}")
+    lines.append(f"**Weekly attendance digest:** {'on' if db.setting(g, 'digest') == '1' else 'off'}")
     nudge = int(db.setting(g, "nudge_hours", 0))
     nudge_text = f"{plural(nudge, 'hour')} before" if nudge else "off"
     lines.append(f"**Unanswered reminder:** {nudge_text}")
@@ -1819,13 +2017,14 @@ async def config_show(interaction: discord.Interaction):
     lines.append(f"**Delete old raid posts:** {archive_text}")
     scoped: dict[int, dict] = {}
     for key, val in db.settings_with_prefix(g).items():
-        for prefix, label in (("ping_role@", "ping"), ("officer_role@", "officers")):
+        for prefix, label in (("ping_role@", "ping"), ("officer_role@", "officers"), ("voice_channel@", "voice")):
             if key.startswith(prefix):
                 scoped.setdefault(int(key[len(prefix):]), {})[label] = val
     if scoped:
         lines.append("**Channel / category settings:**")
         for cid, d in scoped.items():
-            parts = [f"ping <@&{d['ping']}>" if "ping" in d else "", f"officers <@&{d['officers']}>" if "officers" in d else ""]
+            parts = [f"ping <@&{d['ping']}>" if "ping" in d else "", f"officers <@&{d['officers']}>" if "officers" in d else "",
+                     f"voice <#{d['voice']}>" if "voice" in d else ""]
             lines.append(f"• <#{cid}>: " + ", ".join(p for p in parts if p))
     await interaction.response.send_message("\n".join(lines)[:2000], ephemeral=True,
                                             allowed_mentions=discord.AllowedMentions.none())
@@ -1835,11 +2034,13 @@ async def config_show(interaction: discord.Interaction):
 @app_commands.describe(target="Channel or category (default: the channel you run this in)",
                        ping="Role pinged for raids posted there",
                        officer="Role that can manage raids there, and only there",
+                       voice="Voice channel for the attendance check of raids posted there (see /config voicechannel)",
                        clear="Remove this channel's settings")
 async def config_channel(interaction: discord.Interaction,
                          target: Optional[Union[discord.TextChannel, discord.CategoryChannel]] = None,
                          ping: Optional[discord.Role] = None, officer: Optional[discord.Role] = None,
-                         clear: bool = False):
+                         clear: bool = False,
+                         voice: Optional[Union[discord.VoiceChannel, discord.StageChannel]] = None):
     tgt = target or interaction.channel
     if isinstance(tgt, discord.Thread):
         tgt = tgt.parent
@@ -1850,15 +2051,18 @@ async def config_channel(interaction: discord.Interaction,
     if clear:
         db.set_setting(g, f"ping_role@{tgt.id}", None)
         db.set_setting(g, f"officer_role@{tgt.id}", None)
+        db.set_setting(g, f"voice_channel@{tgt.id}", None)
         return await interaction.response.send_message(f"Cleared the settings for {tgt.mention}.",
                                                        ephemeral=True, allowed_mentions=quiet)
-    if ping is None and officer is None:
+    if ping is None and officer is None and voice is None:
         cur_ping = db.setting(g, f"ping_role@{tgt.id}")
         cur_off = db.setting(g, f"officer_role@{tgt.id}")
+        cur_voice = db.setting(g, f"voice_channel@{tgt.id}")
         return await interaction.response.send_message(
             f"{tgt.mention}\nPing role: {f'<@&{cur_ping}>' if cur_ping else 'none'}\n"
             f"Officer role: {f'<@&{cur_off}>' if cur_off else 'none'}\n"
-            "Set them with the `ping` and `officer` options, or `clear: True` to remove both.",
+            f"Voice channel: {f'<#{cur_voice}>' if cur_voice else 'none'}\n"
+            "Set them with the `ping`, `officer` and `voice` options, or `clear: True` to remove them all.",
             ephemeral=True, allowed_mentions=quiet)
     done = []
     if ping is not None:
@@ -1867,6 +2071,9 @@ async def config_channel(interaction: discord.Interaction,
     if officer is not None:
         db.set_setting(g, f"officer_role@{tgt.id}", officer.id)
         done.append(f"{officer.mention} can manage raids in {tgt.mention} only")
+    if voice is not None:
+        db.set_setting(g, f"voice_channel@{tgt.id}", voice.id)
+        done.append(f"raids posted in {tgt.mention} are attendance-checked in {voice.mention}")
     await interaction.response.send_message("Saved: " + "; ".join(done) + ".", ephemeral=True, allowed_mentions=quiet)
 
 
@@ -1918,6 +2125,50 @@ async def config_autoclose(interaction: discord.Interaction, hours: app_commands
     await interaction.response.send_message(
         f"Sign-ups will close {plural(hours, 'hour')} before a raid starts (raids already inside that window are left open)."
         if hours else "Sign-ups stay open until the raid starts.", ephemeral=True)
+
+
+@config.command(name="voicechannel", description="Voice channel for the automatic attendance check (leave empty to turn it off)")
+@app_commands.describe(channel="Where raiders gather. People signed up as 'in' who aren't in it are marked no-show",
+                       minutes="How long after the start to check (default 15)")
+async def config_voicechannel(interaction: discord.Interaction,
+                              channel: Optional[Union[discord.VoiceChannel, discord.StageChannel]] = None,
+                              minutes: Optional[app_commands.Range[int, 5, 120]] = None):
+    g = interaction.guild_id
+    quiet = discord.AllowedMentions.none()
+    if channel is None:
+        db.set_setting(g, "voice_channel", None)
+        return await interaction.response.send_message(
+            "The automatic attendance check is off (a channel with its own voice setting from `/config channel` still uses it).",
+            ephemeral=True)
+    db.set_setting(g, "voice_channel", channel.id)
+    if minutes is not None:
+        db.set_setting(g, "voice_check_minutes", minutes)
+    await interaction.response.send_message(
+        f"{plural(int_setting(g, 'voice_check_minutes', 15), 'minute')} after a raid starts, I'll check {channel.mention}. "
+        "Anyone signed up as **in** who isn't there is marked as a no-show (undo with `/raid noshow`). "
+        "If nobody is in the channel at all, I skip the check. Use `/config channel voice:` for a different channel per raid team.",
+        ephemeral=True, allowed_mentions=quiet)
+
+
+@config.command(name="buffs", description="Warn on the raid post when nobody can provide Bloodlust or a battle res")
+@app_commands.describe(on="True = show a warning once 8 or more people are signed up and none of them can provide it")
+async def config_buffs(interaction: discord.Interaction, on: bool):
+    db.set_setting(interaction.guild_id, "buffs", "1" if on else "0")
+    for upcoming in db.upcoming_events(interaction.guild_id, int(time.time()))[:25]:  # redraw the open posts now
+        if upcoming["message_id"]:
+            await refresh_message(upcoming["id"])
+    await interaction.response.send_message(
+        "Raid posts will warn about missing Bloodlust / battle res (it depends on the game version in your settings)."
+        if on else "Raid posts won't warn about missing utility.", ephemeral=True)
+
+
+@config.command(name="digest", description="Post a weekly attendance summary in the log channel")
+@app_commands.describe(on="True = every Monday (after 09:00, server time) in the channel from /config logchannel")
+async def config_digest(interaction: discord.Interaction, on: bool):
+    db.set_setting(interaction.guild_id, "digest", "1" if on else "0")
+    await interaction.response.send_message(
+        "I'll post a weekly attendance summary in the log channel. (Needs `/config logchannel`.)" if on else
+        "No weekly summary.", ephemeral=True)
 
 
 @config.command(name="logchannel", description="Channel that gets a line for each raid created, edited or cancelled")
@@ -1998,7 +2249,7 @@ async def help_command(interaction: discord.Interaction):
         "`/raid roster` copy-friendly list of who is coming\n"
         "`/raid copy` same raid, new date · `/raid repeat` weekly or every 2 weeks\n"
         "`/raid template save|list|delete` saved setups, then `/raid create template:`\n"
-        "`/raid noshow` mark someone who didn't turn up · `/stats team` everyone's attendance\n"
+        "`/raid noshow` mark someone who didn't turn up · `/stats team` everyone's attendance · `/stats export` as a spreadsheet\n"
         "`/raid list` upcoming raids with counts · `/raid add` sign someone up or change their status\n"
         "`/raid close` · `/raid cancel` · `/raid remove` · `/raid unsigned`"))
     embed.add_field(name="Admins", inline=False, value=(
@@ -2008,6 +2259,8 @@ async def help_command(interaction: discord.Interaction):
         "`/config threads` discussion thread per raid · `/config archive` delete old posts\n"
         "`/config nudge` ping people who haven't answered · `/config logchannel` activity log\n"
         "`/config raiderrole` only that role can sign up · `/config autoclose` close sign-ups before the start\n"
+        "`/config voicechannel` automatic no-shows from a voice channel · `/config buffs` warn about missing Bloodlust / battle res\n"
+        "`/config digest` weekly attendance summary. Officers can also limit classes: `/raid create classes: Mage 4`\n"
         "`/config backup` get a copy of the database · `/status` bot health check"))
     embed.set_footer(text="Anyone on the bench is moved in automatically when a slot opens.")
     await interaction.response.send_message(embed=embed, ephemeral=True)

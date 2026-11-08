@@ -323,6 +323,7 @@ on any single date. `/always list` shows what you're in, and `/always leave` sto
 | Admins | `/config updatenotice` | Say in the log channel when a newer version is released (default: off) |
 | Admins | `/config backup` | Sends you a private copy of the database as a file |
 | Admins | `/config board` | A pinned **Upcoming raids** message in a channel you pick, with each raid's time, signups per role and a link to its post. It updates by itself (default: off) |
+| Admins | `/alerts lowsignup` | Tell officers in a channel you pick when a raid is short of people a set number of hours before it starts (default: off) |
 | Admins | `/config backupchannel` | Post a copy of this server's data in a private admin channel every day, so a backup lives off the bot's PC (default: off) |
 | Admins | `/status` | Health check: version, uptime, channel permissions, last backup, last problem |
 
@@ -340,6 +341,14 @@ on any single date. `/always list` shows what you're in, and `/always leave` sto
   raid's channel, so officer-only or team-only raids stay hidden on a public board. Run it again to move the board or to bring
   it back if someone deleted it, and leave the channel empty to turn it off. Pinning needs **Manage Messages**; without it the
   board still works, unpinned.
+- `/alerts lowsignup hours channel` checks each raid once, that many hours before it starts, and if a role with a limit
+  still has open slots (or, with `minimum`, fewer than that many people are in) it posts one line in the channel you pick,
+  e.g. *⚠️ Low signups: Karazhan starts in 4 hours and is short: 1 healer slot open (4/5)*. A raid with enough people gets
+  no message. Add `ping_officers: True` to mention the raid's officer role (the `/config channel` raid leaders, else
+  `/config officer`). An officers-only channel works best: a raid is only mentioned if everyone who can read the alert
+  channel can also see the raid's channel, so a private raid is never announced somewhere more public. A raid posted, or
+  moved, to less than that many hours ahead isn't checked. `/alerts lowsignup 0` turns it off. (It lives under `/alerts`
+  because Discord allows at most 25 commands under `/config`.)
 - `/config logchannel` posts a one-line note whenever a raid is created, edited, cancelled, closed or someone is marked a no-show.
 
 ### Who can do what

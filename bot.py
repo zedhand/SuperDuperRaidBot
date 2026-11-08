@@ -1151,6 +1151,8 @@ async def post_event(channel, guild, creator_id: int, title: str, description: s
     schedule_board(guild.id)
     if autoclose_inside(guild.id, ts):
         db.update_event(event_id, autoclosed=1)  # posted inside the window: don't close it a minute later
+    if lowsignup_inside(guild.id, ts):
+        db.update_event(event_id, low_alerted=1)  # posted inside the window: the officer posting it knows it's empty
     notes = []
     if ping and not ping.is_default() and not (
             ping.mentionable or channel.permissions_for(guild.me).mention_everyone):
@@ -1457,7 +1459,8 @@ async def raid_edit(interaction: discord.Interaction, event_id: int, title: Opti
             return await interaction.response.send_message("That time is in the past.", ephemeral=True)
         if ts != event["start_ts"]:
             fields.update(start_ts=ts, reminded=0, lock_shown=0, nudged=0,  # re-arm the reminder, nudge and lock
-                          autoclosed=1 if autoclose_inside(event["guild_id"], ts) else 0)
+                          autoclosed=1 if autoclose_inside(event["guild_id"], ts) else 0,
+                          low_alerted=1 if lowsignup_inside(event["guild_id"], ts) else 0)
             if event["autoclosed"] and event["closed"]:
                 db.set_closed(event_id, False)  # it was closed automatically for the old time: reopen
             time_changed = True
@@ -1466,7 +1469,7 @@ async def raid_edit(interaction: discord.Interaction, event_id: int, title: Opti
                                                        ephemeral=True)
     db.update_event(event_id, **fields)
     await audit(interaction.guild_id, f"✏️ {interaction.user.mention} edited **{event['title']}** (#{event_id}): "
-                                      + ", ".join(sorted(k for k in fields if k not in ("reminded", "lock_shown", "nudged", "autoclosed"))))
+                                      + ", ".join(sorted(k for k in fields if k not in ("reminded", "lock_shown", "nudged", "autoclosed", "low_alerted"))))
     await interaction.response.send_message(f"Updated event #{event_id}.", ephemeral=True)
     await update_event(event_id)  # a raised limit may free bench slots
     if time_changed and notify:
@@ -2243,7 +2246,8 @@ _board_tasks: set = set()  # keeps the waiting redraws alive until they run
 
 def board_can_show(board_channel, raid_channel_id: int) -> bool:
     """A raid goes on the board only if everyone who can read the board can also see the raid's channel (checked
-    role by role), so a raid in an officers-only or team-only channel never shows up on a public board."""
+    role by role), so a raid in an officers-only or team-only channel never shows up on a public board. The
+    low-signup alert uses the same rule for its channel."""
     if raid_channel_id == board_channel.id:
         return True
     raid_channel = bot.get_channel(raid_channel_id)
@@ -2366,6 +2370,75 @@ async def _run_board(now: int) -> None:
         await _attempt("board", g, partial(draw_board, g))
 
 
+# ---------------------------------------------------------------- low-signup alert (/alerts lowsignup)
+def lowsignup_inside(guild_id: int, start_ts: int) -> bool:
+    """True if a raid starting at start_ts is already inside the /config lowsignup window."""
+    hours = int_setting(guild_id, "lowsignup_hours")
+    return bool(hours and int_setting(guild_id, "lowsignup_channel") and start_ts - hours * 3600 <= time.time())
+
+
+def lowsignup_short(event, minimum: int) -> list[str]:
+    """What the raid is short of: open slots in each role that has a limit, and people below `minimum` (0 = no
+    minimum). Empty means the raid looks fine."""
+    attending = [x for x in db.signups(event["id"]) if x["status"] in ("in", "late")]
+    short = []
+    if minimum and len(attending) < minimum:
+        short.append(f"{len(attending)}/{minimum} people in")
+    names = {"tank": "tank", "healer": "healer", "dps": "DPS"}
+    for role in wd.ROLES:
+        cap = event[f"cap_{role}"]
+        have = sum(1 for x in attending if x["role"] == role)
+        if cap and have < cap:
+            short.append(f"{cap - have} {names.get(role, role)} slot{'s' if cap - have != 1 else ''} open ({have}/{cap})")
+    return short
+
+
+def lowsignup_ping_role(event, raid_channel):
+    """The officer role to ping for this raid: its channel's (or category's) raid leaders, else the server's."""
+    ids = scoped_role_ids(event["guild_id"], raid_channel, "officer_role") if raid_channel else []
+    role_id = ids[0] if ids else int_setting(event["guild_id"], "officer_role")
+    guild = getattr(raid_channel, "guild", None)
+    return guild.get_role(role_id) if guild is not None and role_id else None
+
+
+async def _lowsignup_one(event, now: int):
+    g = event["guild_id"]
+    hours = int_setting(g, "lowsignup_hours")
+    channel = bot.get_channel(int_setting(g, "lowsignup_channel"))
+    if not hours or channel is None:
+        return WAIT  # off (or its channel is gone): the raid stays unchecked, in case it's turned on later
+    if event["start_ts"] - hours * 3600 > now:
+        return WAIT
+    short = lowsignup_short(event, int_setting(g, "lowsignup_min"))
+    if not short:
+        return True  # enough people: the check is done for this raid
+    if not board_can_show(channel, event["channel_id"]):
+        log.info("Low-signup alert for raid %s skipped: some readers of the alert channel can't see the raid", event["id"])
+        return True  # never tell a wider audience about a raid in a more private channel
+    link = f"https://discord.com/channels/{g}/{event['channel_id']}/{event['message_id']}"
+    text = (f"⚠️ **Low signups:** [**{event['title']}**]({link}) in <#{event['channel_id']}> starts "
+            f"<t:{event['start_ts']}:R> and is short: " + "; ".join(short) + ".")
+    role = lowsignup_ping_role(event, bot.get_channel(event["channel_id"])) if db.setting(g, "lowsignup_ping") == "1" else None
+    if role is not None:
+        text = f"{role.mention} {text}"
+    try:
+        await channel.send(text[:2000], allowed_mentions=discord.AllowedMentions(everyone=False, users=False, roles=[role])
+                           if role is not None
+                           else discord.AllowedMentions.none())
+    except discord.HTTPException as e:
+        log.warning("Low-signup alert failed for event %s: %s", event["id"], e)
+        note_error(f"low-signup alert for raid #{event['id']}: {e}")
+        return False
+    return True
+
+
+async def _run_lowsignup(now: int) -> None:
+    on = set(db.guilds_with_key("lowsignup_channel"))
+    for event in (e for e in db.pending_lowsignup(now) if e["guild_id"] in on):  # optional: tell officers a raid is short (/alerts lowsignup)
+        if await _attempt("lowsignup", event["id"], partial(_lowsignup_one, event, now)):
+            db.update_event(event["id"], low_alerted=1)
+
+
 async def _run_locks(now: int) -> None:
     for event in db.due_lock(now):  # start time passed: show "This event is closed."
         if await _attempt("lock", event["id"], partial(refresh_message, event["id"])):
@@ -2400,7 +2473,7 @@ async def _run_nudges(now: int) -> None:
 async def reminder_loop():
     now = int(time.time())
     for step in (_run_autoclose, _run_locks, _run_voicecheck, _run_repeats, _run_archive, _run_reminders, _run_nudges,
-                 _run_digest, _run_backuppost, _run_board, _run_updatecheck):
+                 _run_lowsignup, _run_digest, _run_backuppost, _run_board, _run_updatecheck):
         try:
             await step(now)
         except Exception as e:  # e.g. a database error: log it, and still run the other steps
@@ -2802,6 +2875,9 @@ class AdminGroup(app_commands.Group):
 
 config = AdminGroup(name="config", description="Bot settings for this server",
                     default_permissions=discord.Permissions(manage_guild=True), guild_only=True)
+# /config holds Discord's maximum of 25 subcommands, so newer admin settings live in groups of their own
+alerts = AdminGroup(name="alerts", description="Optional alerts for officers",
+                    default_permissions=discord.Permissions(manage_guild=True), guild_only=True)
 
 
 COMMON_ZONES = ["America/Vancouver", "America/Edmonton", "America/Los_Angeles", "America/Denver", "America/Chicago",
@@ -3019,6 +3095,7 @@ async def config_show(interaction: discord.Interaction):
     nudge = int(db.setting(g, "nudge_hours", 0))
     nudge_text = f"{plural(nudge, 'hour')} before" if nudge else "off"
     lines.append(f"**Unanswered reminder:** {nudge_text}")
+    lines.append(f"**Low-signup alert:** {lowsignup_text(g)}")
     log_ch = db.setting(g, "log_channel")
     lines.append(f"**Log channel:** {f'<#{log_ch}>' if log_ch else 'none'}")
     archive = int(db.setting(g, "archive_days", 0))
@@ -3113,6 +3190,54 @@ async def config_nudge(interaction: discord.Interaction, hours: app_commands.Ran
         f"{plural(hours, 'hour')} before a raid, I'll ping anyone in its ping role who hasn't answered. "
         "(Needs a ping role: `/config pingrole` or `/config channel`.)" if hours else
         "No reminders for people who haven't answered.", ephemeral=True)
+
+def lowsignup_text(g: int) -> str:
+    hours, channel = int_setting(g, "lowsignup_hours"), db.setting(g, "lowsignup_channel")
+    if not (hours and channel):
+        return "off"
+    minimum = int_setting(g, "lowsignup_min")
+    return (f"{plural(hours, 'hour')} before, in <#{channel}>" + (f", fewer than {minimum} in" if minimum else "")
+            + (", pings officers" if db.setting(g, "lowsignup_ping") == "1" else ""))
+
+
+@alerts.command(name="lowsignup", description="Tell officers when a raid is short of people, hours before it starts (0 = off)")
+@app_commands.describe(hours="How long before the start to check. 0 turns it off",
+                       channel="Where the alert goes, e.g. an officers' channel (kept from last time if left empty)",
+                       minimum="Also short with fewer than this many in (0 = only role limits; kept if left empty)",
+                       ping_officers="Mention the raid's officer role in the alert (default: no; kept from last time if left empty)")
+async def alerts_lowsignup(interaction: discord.Interaction, hours: app_commands.Range[int, 0, 168],
+                           channel: Optional[discord.TextChannel] = None,
+                           minimum: Optional[app_commands.Range[int, 0, 100]] = None,
+                           ping_officers: Optional[bool] = None):
+    g = interaction.guild_id
+    if not hours:
+        db.set_setting(g, "lowsignup_hours", 0)
+        return await interaction.response.send_message("No more low-signup alerts.", ephemeral=True)
+    target = channel or bot.get_channel(int_setting(g, "lowsignup_channel"))
+    if target is None:
+        return await interaction.response.send_message(
+            "Pick a channel for the alerts, ideally one only officers can see. Nothing was changed.", ephemeral=True)
+    mine = target.permissions_for(target.guild.me)
+    missing = [name for name, ok in (("View Channel", mine.view_channel), ("Send Messages", mine.send_messages)) if not ok]
+    if missing:
+        return await interaction.response.send_message(
+            f"I need {', '.join(missing)} in {target.mention} to post alerts there. Nothing was changed.",
+            ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+    db.set_setting(g, "lowsignup_hours", hours)
+    db.set_setting(g, "lowsignup_channel", target.id)
+    if minimum is not None:
+        db.set_setting(g, "lowsignup_min", minimum or None)
+    if ping_officers is not None:
+        db.set_setting(g, "lowsignup_ping", "1" if ping_officers else None)
+    minimum = int_setting(g, "lowsignup_min")
+    ping_officers = db.setting(g, "lowsignup_ping") == "1"
+    rule = (f"fewer than {minimum} people are in, or a role with a limit still has open slots" if minimum
+            else "a role with a limit (tanks, healers, DPS) still has open slots")
+    await interaction.response.send_message(
+        f"{plural(hours, 'hour')} before each raid I'll check it once, and if {rule}, say so in {target.mention}"
+        f"{' and mention its officer role' if ping_officers else ''}. Raids in a channel that some readers of "
+        f"{target.mention} can't see are never mentioned there, and a raid posted less than {plural(hours, 'hour')} "
+        "ahead isn't checked.", ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
 
 @config.command(name="raiderrole", description="Only members with this role can sign up (leave empty: anyone can)")
@@ -3430,7 +3555,7 @@ async def help_command(interaction: discord.Interaction):
         "`/config officer` who can manage every raid · `/config pingrole` default role to ping\n"
         "`/config channel` per-channel (or category) ping role and raid leaders\n"
         "`/config threads` discussion thread per raid · `/config archive` delete old posts\n"
-        "`/config nudge` ping people who haven't answered · `/config logchannel` activity log\n"
+        "`/config nudge` ping people who haven't answered · `/alerts lowsignup` tell officers a raid is short · `/config logchannel` activity log\n"
         "`/config raiderrole` only that role can sign up · `/config autoclose` close sign-ups before the start\n"
         "`/config voicechannel` automatic no-shows from a voice channel · `/config buffs` warn about missing Bloodlust / battle res\n"
         "`/config digest` weekly attendance summary. Officers can also limit classes: `/raid create classes: Mage 4`\n"
@@ -3499,6 +3624,7 @@ async def setup_hook():
     bot.tree.add_command(config)
     bot.tree.add_command(stats)
     bot.tree.add_command(always)
+    bot.tree.add_command(alerts)
     if GUILD_ID:  # guild sync is instant; global sync can take up to an hour
         guild = discord.Object(id=GUILD_ID)
         bot.tree.copy_global_to(guild=guild)

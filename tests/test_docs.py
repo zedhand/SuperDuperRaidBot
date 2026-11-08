@@ -57,7 +57,7 @@ print("every slash command is documented")
 import bot as B  # noqa: E402
 from discord import app_commands  # noqa: E402
 
-for group in (B.character, B.raid, B.config, B.stats, B.always):
+for group in (B.character, B.raid, B.config, B.stats, B.always, B.alerts):
     B.bot.tree.add_command(group)
 
 

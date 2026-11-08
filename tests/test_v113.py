@@ -1,5 +1,5 @@
 """Offline tests for v1.13/v1.14: the WoW version presets, confirm/undo for /raid cancel and /raid remove, /forgetme,
-the daily backup post, realms on characters, signup notes, the Spec button, /raid promote, the invite export in /raid roster and the Upcoming raids board (more suites are added below as features land).
+the daily backup post, realms on characters, signup notes, the Spec button, /raid promote, the invite export in /raid roster, the Upcoming raids board and the low-signup alert (more suites are added below as features land).
 
 Run:  python -I tests/test_v113.py        (or python tests/run_all.py for every suite)
 """
@@ -1141,6 +1141,143 @@ async def change_with_board_off():
 run(change_with_board_off())
 run(B._run_board(int(time.time())))
 check("with the board off nothing is drawn", len(CH[34].edits) == edits and len(CH[34].sent) == 1)
+
+print("the low-signup alert (/alerts lowsignup)")
+for e in db.upcoming_events(G, 0):
+    db.delete_event(e["id"])
+OFFICER_ROLE = types.SimpleNamespace(id=777, mention="<@&777>")
+CH[41] = RoleChannel(41, set())  # officers only: no ordinary role can read it
+CH[42] = RoleChannel(42, {EVERY_R, RAIDER_R})  # public
+CH[43] = RoleChannel(43, {EVERY_R, RAIDER_R})  # a public raid channel
+CH[44] = RoleChannel(44, {RAIDER_R})  # a raiders-only raid channel
+for c in (CH[41], CH[42], CH[43], CH[44]):
+    c.guild.get_role = lambda r: OFFICER_ROLE if r == 777 else None
+alert = CH[41]
+
+
+class NoSend(RoleChannel):
+    def permissions_for(self, who):
+        return types.SimpleNamespace(view_channel=True, send_messages=False) if who is BOT_ME else super().permissions_for(who)
+CH[45] = NoSend(45, set())
+
+
+def short_raid(title, channel=43, hours_ahead=3, caps=(2, 5, 18)):
+    eid = db.create_event(G, channel, title, "", int(time.time()) + hours_ahead * 3600, 1, *caps)
+    db.set_message_id(eid, 5000 + eid)
+    return eid
+
+
+def alerts_sent(ch=alert):
+    return [a[0] if a else k.get("content", "") for a, k in ch.sent]
+
+
+check("it's off by default", db.setting(G, "lowsignup_hours") is None)
+i = inter(officer)
+run(B.config_show.callback(i))
+check("/config show says it's off", "Low-signup alert:** off" in text(i), text(i))
+early = short_raid("Unchecked while off")
+run(B._run_lowsignup(int(time.time())))
+check("while off nothing is posted and the raid stays unchecked", not alert.sent and db.event(early)["low_alerted"] == 0)
+db.delete_event(early)
+
+i = inter(officer)
+run(B.alerts_lowsignup.callback(i, 4))
+check("turning it on without a channel is refused", db.setting(G, "lowsignup_hours") is None and "Pick a channel" in text(i), text(i))
+i = inter(officer)
+run(B.alerts_lowsignup.callback(i, 4, CH[45]))
+check("a channel the bot can't post in is refused", db.setting(G, "lowsignup_hours") is None and "Send Messages" in text(i), text(i))
+i = inter(officer)
+run(B.alerts_lowsignup.callback(i, 4, alert))
+check("turning it on saves the hours and channel, privately confirmed", db.setting(G, "lowsignup_hours") == "4"
+      and db.setting(G, "lowsignup_channel") == "41" and i.response.sent[0][1].get("ephemeral") is True
+      and "4 hours" in text(i), text(i))
+i = inter(officer)
+run(B.config_show.callback(i))
+check("/config show describes it", "Low-signup alert:** 4 hours before, in <#41>" in text(i), text(i))
+
+kara = short_raid("Karazhan", hours_ahead=3)
+db.set_signup(kara, 50, "Thrall", "Shaman", "Restoration", "healer", "in", None)
+db.set_signup(kara, 51, "Jaina", "Mage", "Frost", "dps", "bench", "dps")
+far = short_raid("Far away", hours_ahead=30)
+hidden = short_raid("Raiders-only", channel=44, hours_ahead=2)
+full = short_raid("Full house", hours_ahead=2, caps=(1, 1, 0))
+db.set_signup(full, 60, "Tank", "Warrior", "Protection", "tank", "in", None)
+db.set_signup(full, 61, "Heal", "Priest", "Holy", "healer", "late", None)
+run(B._run_lowsignup(int(time.time())))
+t = "\n".join(alerts_sent())
+check("each short raid inside the window gets an alert", len(alert.sent) == 2 and "Karazhan" in t, t)
+check("the alert says what's short, counting only people who are in",
+      "2 tank slots open (0/2)" in t and "4 healer slots open (1/5)" in t and "18 DPS slots open (0/18)" in t, t)
+check("it links the post and gives the time", f"/channels/{G}/43/{5000 + kara}" in t and f"<t:{db.event(kara)['start_ts']}:R>" in t, t)
+check("it pings nobody by default", alert.sent[0][1]["allowed_mentions"].roles is False, alert.sent[0][1]["allowed_mentions"])
+check("a raid that isn't in the window yet waits", "Far away" not in t and db.event(far)["low_alerted"] == 0)
+check("a full raid gets no message but is marked done", "Full house" not in t and db.event(full)["low_alerted"] == 1)
+check("in an officers-only alert channel a raiders-only raid is mentioned too", "Raiders-only" in t, t)
+run(B._run_lowsignup(int(time.time())))
+check("each raid is alerted once", len(alert.sent) == 2)
+
+i = inter(officer)
+run(B.alerts_lowsignup.callback(i, 4, CH[42]))
+db.update_event(hidden, low_alerted=0)
+db.update_event(kara, low_alerted=0)
+run(B._run_lowsignup(int(time.time())))
+t = "\n".join(alerts_sent(CH[42]))
+check("with a public alert channel a raiders-only raid is skipped, a public one is not",
+      "Raiders-only" not in t and "Karazhan" in t and db.event(hidden)["low_alerted"] == 1, t)
+
+i = inter(officer)
+run(B.alerts_lowsignup.callback(i, 4, alert, 10, True))
+check("minimum and ping are saved, and the channel can be changed back", db.setting(G, "lowsignup_min") == "10"
+      and db.setting(G, "lowsignup_ping") == "1" and db.setting(G, "lowsignup_channel") == "41", text(i))
+db.set_setting(G, "officer_role", 777)
+roomy = short_raid("No limits", hours_ahead=2, caps=(0, 0, 0))
+for n in range(3):
+    db.set_signup(roomy, 70 + n, f"P{n}", "Mage", "Frost", "dps", "in", None)
+run(B._run_lowsignup(int(time.time())))
+last = alert.sent[-1]
+check("below the minimum counts as short even without role limits", "No limits" in last[0][0] and "3/10 people in" in last[0][0],
+      last[0][0])
+check("ping_officers mentions the officer role, and only that role", last[0][0].startswith("<@&777>")
+      and last[1]["allowed_mentions"].roles == [OFFICER_ROLE] and last[1]["allowed_mentions"].everyone is False, last)
+i = inter(officer)
+run(B.alerts_lowsignup.callback(i, 6))
+check("running it again with just hours keeps the channel, minimum and ping", db.setting(G, "lowsignup_channel") == "41"
+      and db.setting(G, "lowsignup_min") == "10" and db.setting(G, "lowsignup_ping") == "1" and "6 hours" in text(i), text(i))
+db.set_setting(G, "officer_role", None)
+
+soon_ts = int(time.time()) + 3600
+check("a raid posted inside the window counts as checked", B.lowsignup_inside(G, soon_ts)
+      and not B.lowsignup_inside(G, int(time.time()) + 7 * 3600))
+
+moved = short_raid("Moved", hours_ahead=2)
+db.update_event(moved, low_alerted=1)
+i = inter(officer)
+run(B.raid_edit.callback(i, moved, date="+2d 20:00"))
+check("moving a raid out of the window re-arms the check", db.event(moved)["low_alerted"] == 0, text(i))
+i = inter(officer)
+run(B.raid_edit.callback(i, moved, date="+0d", at=(datetime.now(B.guild_tz(G)) + timedelta(hours=2)).strftime("%H:%M")))
+check("moving it to less than the hours ahead counts it as checked",
+      db.event(moved)["start_ts"] - time.time() > 3600 * 6 or db.event(moved)["low_alerted"] == 1, text(i))
+db.delete_event(moved)
+
+sent = len(alert.sent)
+alert.fail_send = discord.HTTPException(types.SimpleNamespace(status=500, reason="x"), "boom")
+flaky = short_raid("Flaky", hours_ahead=2)
+run(B._run_lowsignup(int(time.time())))
+check("a failed post is retried next minute", db.event(flaky)["low_alerted"] == 0)
+alert.fail_send = None
+run(B._run_lowsignup(int(time.time())))
+check("and goes out once it works", len(alert.sent) == sent + 1 and "Flaky" in alert.sent[-1][0][0] and db.event(flaky)["low_alerted"] == 1)
+
+i = inter(officer)
+run(B.alerts_lowsignup.callback(i, 0))
+check("0 turns it off", db.setting(G, "lowsignup_hours") == "0" and "No more" in text(i), text(i))
+i = inter(officer)
+run(B.config_show.callback(i))
+check("/config show says it's off again", "Low-signup alert:** off" in text(i), text(i))
+after = short_raid("After off", hours_ahead=2)
+run(B._run_lowsignup(int(time.time())))
+check("with it off nothing more is posted", len(alert.sent) == sent + 1 and db.event(after)["low_alerted"] == 0)
 
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

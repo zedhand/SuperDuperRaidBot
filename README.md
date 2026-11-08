@@ -287,8 +287,9 @@ on any single date. `/always list` shows what you're in, and `/always leave` sto
 | Officers | `/raid roster` | A private, copy-friendly list of who's coming |
 | Officers | `/raid noshow` | Mark someone who signed up but didn't turn up (add `undo: True` to take it back) |
 | Officers | `/raid close` | Close signups (run it again to reopen) |
-| Officers | `/raid cancel` | Delete a raid and its post (and thread) |
-| Officers | `/raid remove` | Remove someone's signup |
+| Officers | `/raid cancel` | Delete a raid and its post (and thread). It asks first, and `/raid restore` undoes it |
+| Officers | `/raid restore` | Bring back a raid cancelled in the last 14 days, with all its signups, as a new post |
+| Officers | `/raid remove` | Remove someone's signup (it asks first) |
 | Officers | `/raid unsigned` | List (or ping) members of a role who haven't answered |
 | Officers | `/stats team` | Everyone's attendance |
 | Officers | `/stats export` | The same as a spreadsheet file (CSV). It has Discord ids, so keep it private |
@@ -368,6 +369,8 @@ its own bot token) for a second server.
 squares. To use icons, put images named after each class in the `icons` folder (see `icons/README.txt`).
 
 **Can I get the raid in my phone's calendar?** Yes: press the **📅 Calendar** button on the raid post and open the file it sends you. Raids have no end time, so the calendar shows 3 hours.
+
+**I cancelled the wrong raid. Can I get it back?** Yes, for 14 days. `/raid restore` lists this server's recently cancelled raids; pick one and it is posted again in its channel with everyone's signups. After 14 days the copy is deleted for good.
 
 **A player made a mistake. Can an officer fix their signup?** Yes. Use `/raid remove` to clear it, or `/raid add` to set their status, character or spec for them.
 

@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.9.0
+"Faster for officers".
+- **Type dates the way you'd say them.** `/raid create`, `/raid copy` and `/raid edit` now understand `thu 8pm`, `tomorrow 19:30`, `nov 14 8pm`, `+7d 20:00` and `next sun noon`, as well as the old `2026-11-14` with `20:00`. The date box also offers the next two weeks to pick from, and the time box is optional when the date includes a time. In `/raid edit` you can change just the day or just the time. Unclear input is refused with an example instead of guessed (a bare `8` could be morning or evening).
+- **`/raid list`:** your upcoming raids at a glance, with sign-up counts per role, times and links.
+- **`/raid add`:** sign someone up, or change their status, character or spec, for them. It uses their saved main (or the character they already signed up with), or you can pick one of their characters or give a class and spec. It works after sign-ups are closed, still respects role limits (extra people go on the bench), and is written to the activity log.
+- **`/config raiderrole`:** only members with this role can sign up (officers are always allowed). Off by default.
+- **`/config autoclose`:** close sign-ups a set number of hours before the start. Off by default. A raid created inside that window is left open, and an officer can reopen any raid with `/raid close`. Moving a raid re-arms it.
+- Tests: new `tests/test_v19.py`, and a check that every program file is in the updater's file list (a new file that the updater skipped would break updating).
+
 ## 1.8.7
 A hardening release: no new commands except `/config backup`. Everything below came out of a code audit.
 - **The scheduler can no longer die quietly.** Before, one unexpected error stopped locking, reminders, recurring raids and cleanup until the next restart. Each job now runs on its own, a failure in one raid doesn't affect the others, and the scheduler restarts itself if it ever stops.

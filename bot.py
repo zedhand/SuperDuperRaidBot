@@ -5,9 +5,13 @@ import logging
 import logging.handlers
 import os
 import platform
+import re
 import tempfile
 import time
-from datetime import datetime, timedelta
+from datetime import date as Date
+from datetime import datetime
+from datetime import time as Clock
+from datetime import timedelta
 from functools import partial
 from pathlib import Path
 from typing import Optional, Union
@@ -18,7 +22,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
-VERSION = "1.8.7"
+VERSION = "1.9.0"
 WINDOWS = os.name == "nt"  # only used to word messages for the person reading them
 BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / ".env"  # always the .env next to bot.py, whatever folder you launch from
@@ -155,6 +159,22 @@ def default_ping_role_id(guild_id: int, channel) -> int | None:
         return scoped[0]
     server = db.setting(guild_id, "ping_role")
     return int(server) if server else None
+
+
+def may_sign_up(interaction: discord.Interaction) -> bool:
+    """True unless /config raiderrole is set and this member neither has that role nor is an officer."""
+    role_id = int_setting(interaction.guild_id, "raider_role")
+    if not role_id:
+        return True
+    if is_officer(interaction) or holds_scoped_officer_role(interaction):
+        return True
+    return any(r.id == role_id for r in getattr(interaction.user, "roles", []))
+
+
+def autoclose_inside(guild_id: int, start_ts: int) -> bool:
+    """True if a raid starting at start_ts is already inside the /config autoclose window."""
+    hours = int_setting(guild_id, "autoclose_hours")
+    return bool(hours and start_ts - hours * 3600 <= time.time())
 
 
 def apply_cap(event, user_id: int, role: str, status: str) -> tuple[str, str | None]:
@@ -365,6 +385,11 @@ class RaidView(discord.ui.View):
         if is_locked(event):
             await interaction.response.send_message("Signups are closed for this event.", ephemeral=True)
             return None
+        if not may_sign_up(interaction):
+            await interaction.response.send_message(
+                f"Sign-ups here are for members with <@&{int_setting(interaction.guild_id, 'raider_role')}>. "
+                "Ask an officer if you should have it.", ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+            return None
         return event
 
     async def _status(self, interaction: discord.Interaction, status: str):
@@ -559,22 +584,147 @@ def local_to_ts(naive: datetime, tz: ZoneInfo) -> tuple[int | None, str | None]:
                   "night, so I can't tell which one you mean. Pick a different time.")
 
 
-def parse_start_checked(guild_id: int, date: str, at: str) -> tuple[int | None, str]:
-    """'2026-11-14' + '20:00' in the server's timezone -> (unix time, ""), or (None, what to tell the user)."""
+# ---------------------------------------------------------------- typing dates and times
+BAD_TIME = ("Couldn't read that date/time. Try `thu 8pm`, `tomorrow 19:30`, `nov 14 8pm`, `+7d 20:00` "
+            "or `2026-11-14 20:00`.")
+NEED_TIME = "Add a time as well, for example `thu 8pm` or `2026-11-14 20:00`."
+WEEKDAYS = {"mon": 0, "monday": 0, "tue": 1, "tues": 1, "tuesday": 1, "wed": 2, "weds": 2, "wednesday": 2,
+            "thu": 3, "thur": 3, "thurs": 3, "thursday": 3, "fri": 4, "friday": 4, "sat": 5, "saturday": 5,
+            "sun": 6, "sunday": 6}
+MONTHS = {"jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3, "apr": 4, "april": 4, "may": 5,
+          "jun": 6, "june": 6, "jul": 7, "july": 7, "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9,
+          "oct": 10, "october": 10, "nov": 11, "november": 11, "dec": 12, "december": 12}
+_MONTH_RE = "|".join(sorted(MONTHS, key=len, reverse=True))
+_TIME_END = re.compile(r"(?:^|\s)((?:[01]?\d|2[0-3]):[0-5]\d|(?:1[0-2]|0?[1-9])(?::[0-5]\d)?\s*[ap]\.?m\.?"
+                       r"|noon|midnight)$")
+
+
+class WhenError(ValueError):
+    """Text the officer typed couldn't be turned into a date and time; str() is what to tell them."""
+
+
+def parse_time_text(text: str) -> Clock | None:
+    """'20:00', '8pm', '8:30 pm', 'noon', 'midnight' -> a time of day, or None if unreadable.
+    A bare number like '8' is refused: it could mean morning or evening."""
+    t = " ".join(text.lower().split())
+    if t == "noon":
+        return Clock(12, 0)
+    if t == "midnight":
+        return Clock(0, 0)
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})", t)
+    if m and int(m[1]) <= 23 and int(m[2]) <= 59:
+        return Clock(int(m[1]), int(m[2]))
+    m = re.fullmatch(r"(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m\.?", t)
+    if m and 1 <= int(m[1]) <= 12 and int(m[2] or 0) <= 59:
+        hour = int(m[1]) % 12 + (12 if m[3] == "p" else 0)
+        return Clock(hour, int(m[2] or 0))
+    return None
+
+
+def parse_date_text(text: str, now: datetime, at: Clock) -> Date:
+    """The day named by `text`, in the server's timezone. `now` is the local wall-clock time and `at` the
+    time of day the raid will start (a bare weekday means today only if that time hasn't passed yet)."""
+    today = now.date()
+    t = " ".join(text.lower().replace(",", " ").split())
+    m = re.fullmatch(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})", t)
+    if m:
+        try:
+            return Date(int(m[1]), int(m[2]), int(m[3]))
+        except ValueError:
+            raise WhenError(f"`{text.strip()}` isn't a real date.") from None
+    if t in ("today", "tonight"):
+        return today
+    if t in ("tomorrow", "tmrw", "tmr"):
+        return today + timedelta(days=1)
+    m = re.fullmatch(r"(?:(next|this) )?([a-z]+)", t)
+    if m and m[2] in WEEKDAYS:
+        delta = (WEEKDAYS[m[2]] - today.weekday()) % 7
+        if delta == 0 and (m[1] == "next" or datetime.combine(today, at) <= now):
+            delta = 7  # "next thu" on a Thursday, or a Thursday evening that has already started
+        return today + timedelta(days=delta)
+    m = re.fullmatch(r"\+\s*(\d{1,3})\s*(d|w|days?|weeks?)|in (\d{1,3}) (days?|weeks?)", t)
+    if m:
+        n, unit = int(m[1] or m[3]), (m[2] or m[4])
+        return today + timedelta(days=n * (7 if unit.startswith("w") else 1))
+    m = re.fullmatch(rf"(?:({_MONTH_RE}) (\d{{1,2}})(?:st|nd|rd|th)?|(\d{{1,2}})(?:st|nd|rd|th)? ({_MONTH_RE}))(?: (\d{{4}}))?", t)
+    if m:
+        month, day = MONTHS[m[1] or m[4]], int(m[2] or m[3])
+        year = int(m[5]) if m[5] else today.year
+        try:
+            found = Date(year, month, day)
+            if not m[5] and datetime.combine(found, at) <= now:
+                found = Date(year + 1, month, day)  # "nov 14" typed on Nov 20 means next year
+            return found
+        except ValueError:
+            raise WhenError(f"`{text.strip()}` isn't a real date.") from None
+    raise WhenError(BAD_TIME)
+
+
+def parse_when(date_text: str | None, time_text: str | None, now: datetime,
+               base: datetime | None = None) -> datetime:
+    """Date and time as typed -> a naive local datetime. The time may be in its own box or at the end of
+    the date text ('thu 8pm'). `base` (when editing) supplies whatever wasn't typed: the current day and/or
+    time. Raises WhenError with a plain-English message."""
+    d = " ".join((date_text or "").lower().split())
+    at = None
+    if time_text and time_text.strip():
+        at = parse_time_text(time_text)
+        if at is None:
+            raise WhenError(f"Couldn't read the time `{time_text.strip()}`. Use `20:00` or `8pm`.")
+    else:
+        m = _TIME_END.search(d)
+        if m:
+            at = parse_time_text(m[1])
+            d = d[:m.start(1)].strip()
+            if d.endswith(" at") or d == "at":
+                d = d[:-2].strip()
+            d = d.removesuffix("@").strip()
+    if at is None and base is not None:
+        at = base.time()
+    if at is None:
+        raise WhenError(NEED_TIME)
+    if not d:
+        if base is None:
+            raise WhenError(BAD_TIME)
+        return datetime.combine(base.date(), at)
+    return datetime.combine(parse_date_text(d, now, at), at)
+
+
+def parse_start_checked(guild_id: int, date: str, at: str | None = None,
+                        base_ts: int | None = None) -> tuple[int | None, str]:
+    """What an officer typed -> (unix time, ""), or (None, what to tell them). Understands '2026-11-14' with
+    '20:00', but also 'thu', 'tomorrow', 'nov 14', '+7d' and '8pm'. `base_ts` is the raid's current start
+    when editing, so you can change just the day or just the time."""
+    tz = guild_tz(guild_id)
+    now = datetime.now(tz).replace(tzinfo=None)
+    base = datetime.fromtimestamp(base_ts, tz).replace(tzinfo=None) if base_ts else None
     try:
-        naive = datetime.strptime(f"{date.strip()} {at.strip()}", "%Y-%m-%d %H:%M")
-    except ValueError:
-        return None, BAD_TIME
-    ts, problem = local_to_ts(naive, guild_tz(guild_id))
+        naive = parse_when(date, at, now, base)
+    except WhenError as e:
+        return None, str(e)
+    ts, problem = local_to_ts(naive, tz)
     return ts, problem or ""
 
 
-def parse_start(guild_id: int, date: str, at: str) -> int | None:
+def parse_start(guild_id: int, date: str, at: str | None = None) -> int | None:
     """Like parse_start_checked but only the time (None when unreadable or ambiguous)."""
     return parse_start_checked(guild_id, date, at)[0]
 
 
-BAD_TIME = "Couldn't read that date/time. Use `YYYY-MM-DD` and `HH:MM` (24-hour), e.g. `2026-11-14` `20:00`."
+async def date_autocomplete(interaction: discord.Interaction, current: str):
+    """The next two weeks as 'Thu Nov 12', for picking a day. Anything else typed ('thu 8pm') still works."""
+    today = datetime.now(guild_tz(interaction.guild_id)).date()
+    out = []
+    for i in range(15):
+        day = today + timedelta(days=i)
+        label = f"{day:%a %b %d}" + (" (today)" if i == 0 else " (tomorrow)" if i == 1 else "")
+        if current.lower().strip() in label.lower() or current.strip() in day.isoformat():
+            out.append(app_commands.Choice(name=label, value=day.isoformat()))
+    return out
+
+
+DATE_HELP = "Day: thu, tomorrow, nov 14, +7d or 2026-11-14. It can include the time: thu 8pm"
+TIME_HELP = "Time, e.g. 20:00 or 8pm (not needed if the date includes it)"
 
 
 def threads_default(guild_id: int) -> bool:
@@ -602,6 +752,8 @@ async def post_event(channel, guild, creator_id: int, title: str, description: s
         db.delete_event(event_id)
         raise
     db.set_message_id(event_id, msg.id)
+    if autoclose_inside(guild.id, ts):
+        db.update_event(event_id, autoclosed=1)  # posted inside the window: don't close it a minute later
     notes = []
     if ping and not ping.is_default() and not (
             ping.mentionable or channel.permissions_for(guild.me).mention_everyone):
@@ -641,7 +793,7 @@ async def template_autocomplete(interaction: discord.Interaction, current: str):
 
 @raid.command(name="create", description="Post a new raid event")
 @app_commands.rename(at="time")
-@app_commands.describe(date="YYYY-MM-DD (server timezone)", at="HH:MM, 24-hour",
+@app_commands.describe(date=DATE_HELP, at=TIME_HELP,
                        title="Raid name (optional if you pick a template)",
                        template="Start from a saved template (see /raid template save)",
                        description="Extra info (optional)", tanks="Max tanks (0 = no limit)",
@@ -649,8 +801,9 @@ async def template_autocomplete(interaction: discord.Interaction, current: str):
                        ping="Role to ping (default: this channel's, category's or the server's ping role)",
                        repeat="Post the next one automatically", thread="Start a discussion thread under the post")
 @app_commands.choices(repeat=REPEAT_CHOICES)
-@app_commands.autocomplete(template=template_autocomplete)
-async def raid_create(interaction: discord.Interaction, date: str, at: str, title: Optional[str] = None,
+@app_commands.autocomplete(template=template_autocomplete, date=date_autocomplete)
+async def raid_create(interaction: discord.Interaction, date: str, at: Optional[str] = None,
+                      title: Optional[str] = None,
                       template: Optional[str] = None, description: Optional[str] = None,
                       tanks: Optional[app_commands.Range[int, 0, 40]] = None,
                       healers: Optional[app_commands.Range[int, 0, 40]] = None,
@@ -702,14 +855,14 @@ async def raid_create(interaction: discord.Interaction, date: str, at: str, titl
 
 @raid.command(name="copy", description="Copy a raid to a new date (same limits and description, no signups)")
 @app_commands.rename(at="time")
-@app_commands.describe(date="New date YYYY-MM-DD", at="New time HH:MM, 24-hour", title="New title (default: same)")
-@app_commands.autocomplete(event_id=event_autocomplete)
-async def raid_copy(interaction: discord.Interaction, event_id: int, date: str, at: str,
+@app_commands.describe(date=DATE_HELP, at=TIME_HELP, title="New title (default: same)")
+@app_commands.autocomplete(event_id=event_autocomplete, date=date_autocomplete)
+async def raid_copy(interaction: discord.Interaction, event_id: int, date: str, at: Optional[str] = None,
                     title: Optional[str] = None):
     event = await _get_event(interaction, event_id)
     if not event:
         return await interaction.response.send_message("Event not found.", ephemeral=True)
-    ts, problem = parse_start_checked(interaction.guild_id, date, at)
+    ts, problem = parse_start_checked(interaction.guild_id, date, at, base_ts=event["start_ts"])
     if ts is None:
         return await interaction.response.send_message(problem, ephemeral=True)
     if ts <= int(time.time()):
@@ -838,11 +991,11 @@ async def template_delete(interaction: discord.Interaction, name: str):
 
 @raid.command(name="edit", description="Change an event's title, time, description or role limits")
 @app_commands.rename(at="time")
-@app_commands.describe(title="New title", description="New description", date="New date YYYY-MM-DD",
-                       at="New time HH:MM (24-hour)", tanks="New tank limit (0 = no limit)",
+@app_commands.describe(title="New title", description="New description", date="New day: " + DATE_HELP[5:],
+                       at="New time, e.g. 20:00 or 8pm", tanks="New tank limit (0 = no limit)",
                        healers="New healer limit (0 = no limit)", dps="New DPS limit (0 = no limit)",
                        notify="If the time changed, tell everyone who signed up (default yes)")
-@app_commands.autocomplete(event_id=event_autocomplete)
+@app_commands.autocomplete(event_id=event_autocomplete, date=date_autocomplete)
 async def raid_edit(interaction: discord.Interaction, event_id: int, title: Optional[str] = None,
                     description: Optional[str] = None, date: Optional[str] = None,
                     at: Optional[str] = None, tanks: Optional[app_commands.Range[int, 0, 40]] = None,
@@ -863,28 +1016,23 @@ async def raid_edit(interaction: discord.Interaction, event_id: int, title: Opti
             fields[key] = val
     time_changed = False
     if date or at:
-        tz = guild_tz(interaction.guild_id)
-        cur = datetime.fromtimestamp(event["start_ts"], tz)
-        try:
-            naive = datetime.strptime(f"{(date or cur.strftime('%Y-%m-%d')).strip()} {(at or cur.strftime('%H:%M')).strip()}",
-                                      "%Y-%m-%d %H:%M")
-        except ValueError:
-            return await interaction.response.send_message(
-                "Couldn't read that date/time. Use `YYYY-MM-DD` and `HH:MM` (24-hour).", ephemeral=True)
-        ts, problem = local_to_ts(naive, tz)
+        ts, problem = parse_start_checked(interaction.guild_id, date or "", at, base_ts=event["start_ts"])
         if ts is None:
             return await interaction.response.send_message(problem, ephemeral=True)
         if ts <= int(time.time()):
             return await interaction.response.send_message("That time is in the past.", ephemeral=True)
         if ts != event["start_ts"]:
-            fields.update(start_ts=ts, reminded=0, lock_shown=0, nudged=0)  # re-arm the reminder, the nudge and the lock
+            fields.update(start_ts=ts, reminded=0, lock_shown=0, nudged=0,  # re-arm the reminder, nudge and lock
+                          autoclosed=1 if autoclose_inside(event["guild_id"], ts) else 0)
+            if event["autoclosed"] and event["closed"]:
+                db.set_closed(event_id, False)  # it was closed automatically for the old time: reopen
             time_changed = True
     if not fields:
         return await interaction.response.send_message("Nothing to change. Fill in at least one option.",
                                                        ephemeral=True)
     db.update_event(event_id, **fields)
     await audit(interaction.guild_id, f"✏️ {interaction.user.mention} edited **{event['title']}** (#{event_id}): "
-                                      + ", ".join(sorted(k for k in fields if k not in ("reminded", "lock_shown", "nudged"))))
+                                      + ", ".join(sorted(k for k in fields if k not in ("reminded", "lock_shown", "nudged", "autoclosed"))))
     await interaction.response.send_message(f"Updated event #{event_id}.", ephemeral=True)
     await update_event(event_id)  # a raised limit may free bench slots
     if time_changed and notify:
@@ -897,6 +1045,107 @@ async def raid_edit(interaction: discord.Interaction, event_id: int, title: Opti
                                    allowed_mentions=USERS_ONLY)
             except discord.HTTPException:
                 pass
+
+
+@raid.command(name="list", description="Upcoming raids you can manage, with sign-up counts and links")
+async def raid_list(interaction: discord.Interaction):
+    now = int(time.time())
+    rows = [e for e in db.upcoming_events(interaction.guild_id, now)
+            if e["message_id"] and can_manage_channel(interaction, e["channel_id"])]
+    if not rows:
+        return await interaction.response.send_message("No upcoming raids that you can manage.", ephemeral=True)
+    lines = []
+    for e in rows[:15]:
+        attending = [x for x in db.signups(e["id"]) if x["status"] in ("in", "late")]
+        by_role = {r: sum(1 for x in attending if x["role"] == r) for r in wd.ROLES}
+
+        def part(letter: str, role: str) -> str:
+            cap = e[f"cap_{role}"]
+            return f"{letter} {by_role[role]}/{cap}" if cap else f"{letter} {by_role[role]}"
+
+        others = {st: sum(1 for x in db.signups(e["id"]) if x["status"] == st) for st in ("tentative", "bench")}
+        extra = "".join(f" · {n} {st}" for st, n in others.items() if n) + (" · 🔒 closed" if e["closed"] else "")
+        link = f"https://discord.com/channels/{e['guild_id']}/{e['channel_id']}/{e['message_id']}"
+        lines.append(f"[**#{e['id']} {e['title']}**]({link}) · <t:{e['start_ts']}:f> (<t:{e['start_ts']}:R>) · <#{e['channel_id']}>\n"
+                     f"👥 {len(attending)} in · {part('🛡️', 'tank')} · {part('💚', 'healer')} · {part('⚔️', 'dps')}{extra}")
+    text = "\n".join(lines)
+    if len(rows) > 15:
+        text += f"\n…and {len(rows) - 15} more"
+    await interaction.response.send_message(text[:2000], ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+
+STATUS_CHOICES = [app_commands.Choice(name="In", value="in"), app_commands.Choice(name="Late", value="late"),
+                  app_commands.Choice(name="Tentative", value="tentative"), app_commands.Choice(name="Bench", value="bench"),
+                  app_commands.Choice(name="Absent", value="absent")]
+
+
+async def member_character_autocomplete(interaction: discord.Interaction, current: str):
+    """The saved characters of the member chosen in this command (so an officer can pick one of theirs)."""
+    uid = getattr(getattr(interaction.namespace, "member", None), "id", None)
+    if not uid:
+        return []
+    return [app_commands.Choice(name=f"{c['name']} ({c['spec']} {c['wow_class']})"[:100], value=c["name"])
+            for c in db.characters(uid) if current.lower() in c["name"].lower()][:25]
+
+
+@raid.command(name="add", description="Sign someone up, or change their status or character")
+@app_commands.describe(member="Who to sign up (or whose signup to change)", status="Default: in",
+                       character="One of their saved characters (default: the one they signed up with, else their main)",
+                       wowclass="Class, if they have no saved character", spec="Spec, if they have no saved character")
+@app_commands.autocomplete(event_id=event_autocomplete, character=member_character_autocomplete,
+                           wowclass=class_autocomplete, spec=spec_autocomplete)
+@app_commands.choices(status=STATUS_CHOICES)
+async def raid_add(interaction: discord.Interaction, event_id: int, member: discord.Member,
+                   status: Optional[app_commands.Choice[str]] = None, character: Optional[str] = None,
+                   wowclass: Optional[str] = None, spec: Optional[str] = None):
+    event = await _get_event(interaction, event_id)
+    if not event:
+        return await interaction.response.send_message("Event not found.", ephemeral=True)
+    if time.time() >= event["start_ts"]:
+        return await interaction.response.send_message("That raid has already started.", ephemeral=True)
+    if member.bot:
+        return await interaction.response.send_message("Bots can't sign up.", ephemeral=True)
+    st = status.value if status else "in"
+    quiet = discord.AllowedMentions.none()
+    if st == "absent":
+        db.set_signup(event_id, member.id, None, None, None, None, "absent")
+        text = f"Marked {member.mention} as absent for **{event['title']}**."
+        final = "absent"
+    else:
+        row = None
+        if wowclass or spec:
+            cls = wd.find_class(wowclass)
+            sp = wd.find_spec(cls, spec)
+            if not cls or not sp:
+                return await interaction.response.send_message(
+                    "Give both a valid class and a spec (or pick one of their saved characters).", ephemeral=True)
+            row = {"char_name": (character or member.display_name)[:32], "wow_class": cls, "spec": sp,
+                   "role": wd.role_for(cls, sp)}
+        elif character:
+            c = db.character_by_name(member.id, character)
+            if not c:
+                return await interaction.response.send_message(
+                    f"{member.display_name} has no saved character called {character}.", ephemeral=True)
+            row = {"char_name": c["name"], "wow_class": c["wow_class"], "spec": c["spec"], "role": c["role"]}
+        else:
+            existing = db.signup(event_id, member.id)
+            if existing and existing["char_name"]:
+                row = existing
+            elif db.main_character(member.id):
+                m = db.main_character(member.id)
+                row = {"char_name": m["name"], "wow_class": m["wow_class"], "spec": m["spec"], "role": m["role"]}
+        if row is None:
+            return await interaction.response.send_message(
+                f"{member.display_name} has no saved character. Give a `wowclass` and `spec`, or ask them to use "
+                "`/character add`.", ephemeral=True)
+        final, bench_from = apply_cap(event, member.id, row["role"], st)
+        db.set_signup(event_id, member.id, row["char_name"], row["wow_class"], row["spec"], row["role"], final, bench_from)
+        text = f"{member.mention} is now **{final}** for **{event['title']}** as **{row['char_name']}** — {row['spec']} {row['wow_class']}."
+        if final != st:
+            text += f" ({wd.ROLE_LABEL[row['role']].rstrip('s')} slots are full, so they went on the bench.)"
+    await audit(interaction.guild_id, f"➕ {interaction.user.mention} set {member.mention} to {final} for **{event['title']}** (#{event_id})")
+    await interaction.response.send_message(text, ephemeral=True, allowed_mentions=quiet)
+    await update_event(event_id)
 
 
 @raid.command(name="roster", description="Private, copy-friendly list of who is coming")
@@ -1074,6 +1323,24 @@ async def _nudge_one(event, now: int):
     return True
 
 
+async def _autoclose_one(event, now: int):
+    hours = int_setting(event["guild_id"], "autoclose_hours")
+    if not hours or event["start_ts"] - hours * 3600 > now:
+        return WAIT
+    db.set_closed(event["id"], True)
+    if await refresh_message(event["id"]) is False:
+        return False
+    await audit(event["guild_id"], f"🔒 Signups for **{event['title']}** (#{event['id']}) closed automatically, "
+                                   f"{plural(hours, 'hour')} before the start")
+    return True
+
+
+async def _run_autoclose(now: int) -> None:
+    for event in db.pending_autoclose(now):  # optional: close sign-ups N hours before the start (/config autoclose)
+        if await _attempt("autoclose", event["id"], partial(_autoclose_one, event, now)):
+            db.update_event(event["id"], autoclosed=1)
+
+
 async def _run_locks(now: int) -> None:
     for event in db.due_lock(now):  # start time passed: show "This event is closed."
         if await _attempt("lock", event["id"], partial(refresh_message, event["id"])):
@@ -1107,7 +1374,7 @@ async def _run_nudges(now: int) -> None:
 @tasks.loop(minutes=1)
 async def reminder_loop():
     now = int(time.time())
-    for step in (_run_locks, _run_repeats, _run_archive, _run_reminders, _run_nudges):
+    for step in (_run_autoclose, _run_locks, _run_repeats, _run_archive, _run_reminders, _run_nudges):
         try:
             await step(now)
         except Exception as e:  # e.g. a database error: log it, and still run the other steps
@@ -1295,6 +1562,11 @@ async def config_show(interaction: discord.Interaction):
              f"**Officer role:** {f'<@&{officer}>' if officer else 'none (Manage Events permission only)'}",
              f"**Default ping role:** {f'<@&{ping}>' if ping else 'none'}"]
     lines.append(f"**Discussion threads:** {'on' if threads_default(g) else 'off'}")
+    raider = int_setting(g, "raider_role")
+    lines.append(f"**Sign-up role:** {f'<@&{raider}>' if raider else 'anyone'}")
+    autoclose = int_setting(g, "autoclose_hours")
+    autoclose_text = f"{plural(autoclose, 'hour')} before the start" if autoclose else "off"
+    lines.append(f"**Auto-close sign-ups:** {autoclose_text}")
     nudge = int(db.setting(g, "nudge_hours", 0))
     nudge_text = f"{plural(nudge, 'hour')} before" if nudge else "off"
     lines.append(f"**Unanswered reminder:** {nudge_text}")
@@ -1385,6 +1657,27 @@ async def config_nudge(interaction: discord.Interaction, hours: app_commands.Ran
         "No reminders for people who haven't answered.", ephemeral=True)
 
 
+@config.command(name="raiderrole", description="Only members with this role can sign up (leave empty: anyone can)")
+@app_commands.describe(role="Officers can always sign people up with /raid add, whatever this is set to")
+async def config_raiderrole(interaction: discord.Interaction, role: Optional[discord.Role] = None):
+    if role is not None and role.is_default():
+        role = None  # @everyone means "no restriction"
+    db.set_setting(interaction.guild_id, "raider_role", role.id if role else None)
+    await interaction.response.send_message(
+        f"Only members with {role.mention} (and officers) can sign up to raids now." if role else
+        "Anyone who can see the signup channel can sign up.",
+        ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+
+@config.command(name="autoclose", description="Close sign-ups this many hours before a raid starts (0 = off)")
+@app_commands.describe(hours="0 turns it off. Officers can reopen a raid with /raid close")
+async def config_autoclose(interaction: discord.Interaction, hours: app_commands.Range[int, 0, 168]):
+    db.set_setting(interaction.guild_id, "autoclose_hours", hours)
+    await interaction.response.send_message(
+        f"Sign-ups will close {plural(hours, 'hour')} before a raid starts (raids already inside that window are left open)."
+        if hours else "Sign-ups stay open until the raid starts.", ephemeral=True)
+
+
 @config.command(name="logchannel", description="Channel that gets a line for each raid created, edited or cancelled")
 async def config_logchannel(interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None):
     db.set_setting(interaction.guild_id, "log_channel", channel.id if channel else None)
@@ -1462,6 +1755,7 @@ async def help_command(interaction: discord.Interaction):
         "`/raid copy` same raid, new date · `/raid repeat` weekly or every 2 weeks\n"
         "`/raid template save|list|delete` saved setups, then `/raid create template:`\n"
         "`/raid noshow` mark someone who didn't turn up · `/stats team` everyone's attendance\n"
+        "`/raid list` upcoming raids with counts · `/raid add` sign someone up or change their status\n"
         "`/raid close` · `/raid cancel` · `/raid remove` · `/raid unsigned`"))
     embed.add_field(name="Admins", inline=False, value=(
         "`/config show` · `/config timezone` · `/config reminder`\n"
@@ -1469,6 +1763,7 @@ async def help_command(interaction: discord.Interaction):
         "`/config channel` per-channel (or category) ping role and raid leaders\n"
         "`/config threads` discussion thread per raid · `/config archive` delete old posts\n"
         "`/config nudge` ping people who haven't answered · `/config logchannel` activity log\n"
+        "`/config raiderrole` only that role can sign up · `/config autoclose` close sign-ups before the start\n"
         "`/config backup` get a copy of the database · `/status` bot health check"))
     embed.set_footer(text="Anyone on the bench is moved in automatically when a slot opens.")
     await interaction.response.send_message(embed=embed, ephemeral=True)

@@ -1,5 +1,5 @@
 """Offline tests for v1.13/v1.14: the WoW version presets, confirm/undo for /raid cancel and /raid remove, /forgetme,
-the daily backup post, realms on characters and signup notes (more suites are added below as features land).
+the daily backup post, realms on characters, signup notes and the Spec button (more suites are added below as features land).
 
 Run:  python -I tests/test_v113.py        (or python tests/run_all.py for every suite)
 """
@@ -755,6 +755,110 @@ check("/forgetme deletes a player's notes in every server, and in cancelled raid
       and db._one("SELECT COUNT(*) c FROM signups WHERE note IN ('late 15 min','Secretnote')")["c"] == 0
       and "Cancellednote" not in db.cancelled_event(fc)["signups_json"])
 check("other players' notes stay", db.signup(ne, 401)["note"] == "can swap to heals")
+
+# ------------------------------------------------------------ switching spec from the post
+print("the Spec button")
+check("off by default: posts have the usual six buttons and no Spec button", not B.spec_switch_on(G)
+      and "raid:spec" not in [c.custom_id for c in B.RaidView().children] and len(B.RaidView().children) == 6)
+check("the view registered at startup has it, so a post drawn with the button is always answered",
+      "raid:spec" in [c.custom_id for c in B.RaidView(spec_button=True).children])
+sp = db.create_event(G, 11, "Spec raid", "", int(time.time()) + 86400, 1, 1, 1, 0)
+db.set_message_id(sp, 5000)
+db.set_signup(sp, 500, "Healy", "Shaman", "Restoration", "healer", "in", None)
+db.set_note(sp, 500, "bringing feasts")
+db.set_signup(sp, 501, "Tanky", "Warrior", "Protection", "tank", "in", None)
+db.set_signup(sp, 502, "Waity", "Paladin", "Holy", "healer", "bench", "in")
+db.set_signup(sp, 503, None, None, None, None, "absent", None)
+db.set_signup(sp, 504, "Maybe", "Druid", "Balance", "dps", "tentative", None)
+S1, S2, S3, S4, S5 = (member(u) for u in range(500, 505))
+CH[11].edits.clear()
+
+
+def on_post(user):
+    i = inter(user)
+    i.message = types.SimpleNamespace(id=5000, jump_url="http://x/5000")
+    return i
+
+
+def spec_press(user):
+    i = on_post(user)
+    run(B.RaidView(spec_button=True).switch_spec.callback(i))
+    return i
+
+
+def pick(i, spec, user):
+    sel = i.response.sent[0][1]["view"].children[0]
+    sel._values = [spec]  # what Discord fills in when the player picks
+    click = on_post(user)
+    run(sel.callback(click))
+    return click
+
+
+i = spec_press(S1)
+check("pressing it while the switch is off says so and changes nothing", "turned off" in text(i)
+      and i.response.sent[0][1].get("ephemeral") is True and db.signup(sp, 500)["spec"] == "Restoration", text(i))
+
+i = inter(officer)
+run(B.config_specswitch.callback(i, True))
+check("/config specswitch on turns it on and redraws the open posts with the button",
+      B.spec_switch_on(G) and "Spec" in text(i) and any(m == 5000 and "raid:spec" in [c.custom_id for c in k["view"].children]
+                                                        for m, k in CH[11].edits), text(i))
+i = inter(officer)
+run(B.config_show.callback(i))
+check("/config show lists it", "Spec button on raid posts:** on" in text(i), text(i))
+
+i = spec_press(S1)
+opts = [o.label for o in i.response.sent[0][1]["view"].children[0].options]
+check("the picker offers the other specs of the class signed up with, privately", sorted(opts) == ["Elemental", "Enhancement"]
+      and i.response.sent[0][1].get("ephemeral") is True and "Healy" in text(i), (opts, text(i)))
+c = pick(i, "Elemental", S1)
+row = db.signup(sp, 500)
+check("picking one changes spec and role, keeps character, status and note",
+      (row["char_name"], row["wow_class"], row["spec"], row["role"], row["status"], row["note"])
+      == ("Healy", "Shaman", "Elemental", "dps", "in", "bringing feasts") and "Switched to **Elemental**" in text(c), (dict(row), text(c)))
+check("the healer slot that opened goes to the first one waiting for it", db.signup(sp, 502)["status"] == "in"
+      and any(uid == 502 for uid, _ in DMS), dict(db.signup(sp, 502)))
+check("and the post is redrawn", "**Healy**" in post_text(sp))
+
+i = spec_press(S1)
+c = pick(i, "Restoration", S1)
+row = db.signup(sp, 500)
+check("switching into a full role puts them on the bench, waiting for that slot, and says why",
+      row["status"] == "bench" and row["bench_from"] == "in" and row["role"] == "healer"
+      and "Healer slots are full" in text(c) and "#1 in line" in text(c), (dict(row), text(c)))
+i = spec_press(S3)
+c = pick(i, "Retribution", S3)
+check("someone in a role leaving it frees the slot for the one waiting", db.signup(sp, 500)["status"] == "in"
+      and db.signup(sp, 502)["role"] == "dps", dict(db.signup(sp, 500)))
+db.set_signup(sp, 502, "Waity", "Paladin", "Retribution", "dps", "bench", None)  # chose bench themselves
+i = spec_press(S3)
+c = pick(i, "Holy", S3)
+check("a bench or tentative choice of their own stays as it was", db.signup(sp, 502)["status"] == "bench"
+      and db.signup(sp, 502)["bench_from"] is None and db.signup(sp, 502)["spec"] == "Holy")
+i = spec_press(S5)
+c = pick(i, "Restoration", S5)
+check("tentative stays tentative", db.signup(sp, 504)["status"] == "tentative" and db.signup(sp, 504)["role"] == "healer")
+
+i = spec_press(S4)
+check("someone marked absent is asked to sign up first", "Sign Up" in text(i) and "view" not in i.response.sent[0][1], text(i))
+i = spec_press(member(599))
+check("and so is someone who never signed up", "Sign Up" in text(i) and db.signup(sp, 599) is None, text(i))
+
+i = spec_press(S2)
+db.set_signup(sp, 501, "Tanky", "Paladin", "Protection", "tank", "in", None)  # changed character before picking
+c = pick(i, "Fury", S2)
+check("a stale picker (they changed character meanwhile) changes nothing", db.signup(sp, 501)["spec"] == "Protection"
+      and "again" in text(c), text(c))
+
+db.update_event(sp, start_ts=int(time.time()) - 60)
+i = spec_press(S1)
+check("a closed raid can't be changed", "closed" in text(i).lower() and db.signup(sp, 500)["spec"] == "Restoration", text(i))
+db.update_event(sp, start_ts=int(time.time()) + 86400)
+
+i = inter(officer)
+run(B.config_specswitch.callback(i, False))
+check("/config specswitch off takes the button away from the posts again", not B.spec_switch_on(G)
+      and "raid:spec" not in [c.custom_id for c in CH[11].edits[-1][1]["view"].children] and "Sign Up" in text(i), text(i))
 
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

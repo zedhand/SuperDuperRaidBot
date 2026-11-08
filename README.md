@@ -235,7 +235,14 @@ sees the time in **their own** timezone with a live countdown.
 | **Tentative** | Maybe. Not counted yet. |
 | **Bench** | Happy to fill in if there's room. |
 | **Absent** | You can't make it. |
+| **🔄 Spec** | Only if an admin turned it on (`/config specswitch`). Switch to another spec of the character you signed up with, e.g. from Fire to Frost, or from Protection to Fury. |
 | **📅 Calendar** | Gives you a file (`.ics`) to add the raid to Google, Apple or Outlook calendar. Opening it again after the raid moves updates the entry. |
+
+**Switching spec (optional, `/config specswitch`).** With the switch on, raid posts get a **🔄 Spec** button. Press it and pick
+another spec of the class you signed up with: your character, status and note stay as they are. If the new spec has a different
+role (say you go from healer to dps), the role limits are checked again, so you may be put on the bench when that role is full,
+or move in when you were waiting for a slot. Your saved characters aren't changed. To switch to a different character, press
+**Sign Up** again.
 
 Late / Tentative / Bench / Absent reuse the character you signed up with (or your main). If you've never signed up and have
 no saved character, the bot asks you to press **Sign Up** first.
@@ -303,6 +310,7 @@ on any single date. `/always list` shows what you're in, and `/always leave` sto
 | Admins | `/config threads / archive / nudge / logchannel` | Optional extras. All are **off** until you turn them on |
 | Admins | `/config raiderrole` | Only members with this role can sign up (default: anyone) |
 | Admins | `/config realms` | Show each character's realm after the name on raid posts, e.g. `Thrall (Area 52)` (default: off) |
+| Admins | `/config specswitch` | Put a **🔄 Spec** button on raid posts so a signed-up player can switch spec without signing up again (default: off) |
 | Admins | `/config notes` | Let players add a note to their signup with `/note`. Officers see notes in `/raid roster`; `onpost: True` also shows them on the raid post (default: off) |
 | Admins | `/config confirm` | Ask "are you sure?" before `/raid cancel` and `/raid remove` (default: off) |
 | Admins | `/config autoclose` | Close sign-ups a set number of hours before a raid (default: off) |

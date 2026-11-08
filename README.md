@@ -322,6 +322,7 @@ on any single date. `/always list` shows what you're in, and `/always leave` sto
 | Admins | `/config raiderio` | Allow `/character import` (retail only, default: off) and set a default region and realm |
 | Admins | `/config updatenotice` | Say in the log channel when a newer version is released (default: off) |
 | Admins | `/config backup` | Sends you a private copy of the database as a file |
+| Admins | `/config board` | A pinned **Upcoming raids** message in a channel you pick, with each raid's time, signups per role and a link to its post. It updates by itself (default: off) |
 | Admins | `/config backupchannel` | Post a copy of this server's data in a private admin channel every day, so a backup lives off the bot's PC (default: off) |
 | Admins | `/status` | Health check: version, uptime, channel permissions, last backup, last problem |
 
@@ -332,6 +333,13 @@ on any single date. `/always list` shows what you're in, and `/always leave` sto
 - `/config raiderrole` limits sign-ups to one role. Officers are always allowed, and can sign people up with `/raid add`.
 - `/config autoclose` closes sign-ups that many hours before the start. Reopen a raid any time with `/raid close`.
 - `/config voicechannel`, `/config buffs` and `/config digest` switch on the optional extras described under *What the bot does by itself*.
+- `/config board` posts one **📅 Upcoming raids** message in the channel you choose and pins it. It lists the next 15 raids
+  with their time (in each reader's own time zone), how many are in per role, and a link to the post, and it edits itself
+  when a raid is posted, edited, cancelled or restored, when people sign up, and when a raid starts (it drops off). A quiet
+  channel such as `#raid-schedule` works best. A raid is only listed if everyone who can read the board can also see the
+  raid's channel, so officer-only or team-only raids stay hidden on a public board. Run it again to move the board or to bring
+  it back if someone deleted it, and leave the channel empty to turn it off. Pinning needs **Manage Messages**; without it the
+  board still works, unpinned.
 - `/config logchannel` posts a one-line note whenever a raid is created, edited, cancelled, closed or someone is marked a no-show.
 
 ### Who can do what

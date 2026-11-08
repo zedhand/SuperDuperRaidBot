@@ -326,9 +326,8 @@ class DB:
             "characters": self._one("SELECT COUNT(*) c FROM characters WHERE user_id=?", (uid,))["c"],
             "signups": self._one("SELECT COUNT(*) c FROM signups WHERE user_id=?", (uid,))["c"],
             "series": self._one("SELECT COUNT(*) c FROM series_signups WHERE user_id=?", (uid,))["c"],
-            "settings": self._one(
-                f"SELECT COUNT(*) c FROM settings WHERE key IN ({','.join('?' * len(self.USER_SETTING_KEYS))})",
-                tuple(f"{k}@{uid}" for k in self.USER_SETTING_KEYS))["c"],
+            "settings": sum(self._one("SELECT COUNT(*) c FROM settings WHERE key=?", (f"{k}@{uid}",))["c"]
+                            for k in self.USER_SETTING_KEYS),
             "cancelled": cancelled,
         }
 

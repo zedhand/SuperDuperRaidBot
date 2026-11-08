@@ -76,7 +76,9 @@ It does **not** read your server's chat messages. It only reacts to its own comm
 3. **A Raspberry Pi or a small rented server (VPS).** It's plain Python, so it runs on Linux too. See
    [any OS, from source](#any-os-from-source).
 
-**Start it automatically when Windows starts** (so a reboot or power cut doesn't take it down for long): press
+**Start it automatically when Windows starts** (so a reboot or power cut doesn't take it down for long). The easy way: at
+the end of `SETUP.bat` answer **y** to *"Start the bot automatically when Windows starts?"*, or double-click **`Shortcuts.bat`**
+whenever you like. It can also put a **Raid Bot** shortcut on your desktop, and switch either one off again. By hand: press
 `Win + R`, type `shell:startup`, press Enter, then drag a **shortcut** to `start.bat` into the folder that opens.
 
 If you only run raids at set times (say two evenings a week), you *can* switch it on just for those evenings, but people
@@ -109,6 +111,8 @@ you through five short steps and opens the right Discord pages for you:
 
 > **Treat the token like a password.** Anyone who has it can control your bot. Never post it in Discord or share your `.env`
 > file. If it ever leaks, go back to the Developer Portal → Bot → **Reset Token**.
+
+At the very end it asks two optional yes/no questions (the answer is **no** unless you type `y`): a desktop shortcut, and starting the bot when Windows starts. You can change both later with `Shortcuts.bat`.
 
 When it's done, `SETUP.bat` fills in your settings file (`.env`), **deletes itself**, and starts the bot. You'll see
 lines like `Logged in as …`. **Leave that window open** (see [keep it running](#important-the-bot-must-stay-running)).
@@ -258,6 +262,7 @@ on any single date. `/always list` shows what you're in, and `/always leave` sto
 - **Automatic no-shows (optional).** With a voice channel set (`/config voicechannel`), 15 minutes after a raid starts the bot looks at who is in that channel. Anyone signed up as **in** who isn't there is marked as a no-show, so officers don't have to do it by hand, and the result is written to the log channel. If **nobody** is in the channel the check is skipped (the raid is probably being run somewhere else), people marked **late** are never checked, and a mistake is one `/raid noshow` (undo) away. It only looks at raids that started in the last 6 hours, so turning it on never rewrites old attendance.
 - **Class limits (optional).** `/raid create classes: Mage 4, Warlock 2` limits how many of a class can be in. Extra people go on the bench and move in when a spot opens, like role limits. The limits show in the post's footer and are kept by templates, copies and repeating raids. `/raid edit classes: off` removes them.
 - **Missing utility warning (optional, `/config buffs`).** Once 8 or more people are in and none of them can provide it, the post says `No Bloodlust yet (Shaman, Mage, Evoker, Hunter)` or `No a battle res yet (...)`. The lists are in `wow_data.py` and are short on purpose; Classic Era has no Bloodlust.
+- **New-version notice (optional, `/config updatenotice`).** About once a day the bot asks GitHub for the newest release and says so **once per version** in the log channel, with a link. GitHub only sees a request from your computer; nothing about your server is sent. `/status` then also shows the latest version.
 - **Weekly digest (optional, `/config digest`).** Every Monday after 09:00 (server time) a summary of the last 7 days is posted in the log channel: raids, attended, no-shows, who had the most no-shows.
 - **Daily backup** of your data (the last 7 are kept). Each copy is checked right after it is made, and if the database is ever found damaged when the bot starts, it restores the newest healthy backup by itself and keeps the damaged file.
 
@@ -268,6 +273,7 @@ on any single date. `/always list` shows what you're in, and `/always leave` sto
 | Everyone | `/character add / list / main / remove` | Manage your saved characters |
 | Everyone | `/myraids` | The upcoming raids you've answered, with links |
 | Everyone | `/remindme` | Get raid reminders as a private message instead of a channel ping |
+| Everyone | `/character import` | Look a **retail** character up on Raider.IO and save it (only if an admin turned it on) |
 | Everyone | `/always join / leave / list` | Stay signed up to a repeating raid automatically |
 | Everyone | `/stats me` | Your own attendance (last 90 days) |
 | Everyone | `/help` | Command list inside Discord |
@@ -295,6 +301,9 @@ on any single date. `/always list` shows what you're in, and `/always leave` sto
 | Admins | `/config voicechannel` | Mark no-shows automatically from a voice channel (default: off). `/config channel voice:` sets one per raid team |
 | Admins | `/config buffs` | Warn on the post when nobody can provide Bloodlust or a battle res (default: off) |
 | Admins | `/config digest` | Post a weekly attendance summary in the log channel (default: off) |
+| Admins | `/config setup` | A guided private panel for the main settings: roles, channels, timing and the optional extras |
+| Admins | `/config raiderio` | Allow `/character import` (retail only, default: off) and set a default region and realm |
+| Admins | `/config updatenotice` | Say in the log channel when a newer version is released (default: off) |
 | Admins | `/config backup` | Sends you a private copy of the database as a file |
 | Admins | `/status` | Health check: version, uptime, channel permissions, last backup, last problem |
 
@@ -421,6 +430,7 @@ Still stuck? [Open an issue](../../issues/new/choose) with the bot version and t
 - **What the bot can see:** member lists (that's what *Server Members Intent* is for, e.g. for `/raid unsigned`) and the
   commands and button clicks aimed at it. It does **not** read your chat messages.
 - **What it can do:** only what its role allows in each channel. Give it just the channels it needs.
+- **What it sends to other websites:** nothing by default; it only talks to Discord. Two **optional** features contact another site, and only when an admin turns them on: `/config updatenotice` asks GitHub for the newest release number (no information about you or your server), and `/config raiderio` lets a player run `/character import`, which sends the character name and realm *that player typed* to raider.io to look it up (no accounts, nothing else).
 - **`Update.bat` downloads code from this repository's GitHub releases** and checks the download against the checksum GitHub
   publishes for it, which catches corrupted downloads. It can't protect against the repository itself being compromised, so
   only run it if you trust this project (or your fork).

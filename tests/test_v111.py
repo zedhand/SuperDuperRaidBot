@@ -547,7 +547,6 @@ cols = {r[1] for r in migrated.conn.execute("PRAGMA table_info(events)")} | {"t:
 check("an old database gets the new columns and keeps its data", {"voice_checked", "class_caps", "t:class_caps"} <= cols and migrated.event(1)["title"] == "Old")
 check("old raids have no class limits", dbmod.caps_dict(migrated.event(1)["class_caps"]) == {})
 check("caps helpers round-trip", dbmod.caps_dict(dbmod.caps_text({"Mage": 2, "Rogue": 1})) == {"Mage": 2, "Rogue": 1} and dbmod.caps_dict("junk,Mage:x,:3") == {})
-check("version bumped", B.VERSION == "1.11.0")
 
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

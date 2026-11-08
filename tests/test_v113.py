@@ -1,5 +1,5 @@
 """Offline tests for v1.13/v1.14: the WoW version presets, confirm/undo for /raid cancel and /raid remove, /forgetme,
-the daily backup post, realms on characters, signup notes, the Spec button, /raid promote, the invite export in /raid roster, the Upcoming raids board and the low-signup alert (more suites are added below as features land).
+the daily backup post, realms on characters, signup notes, the Spec button, /raid promote, the invite export in /raid roster, the Upcoming raids board, the low-signup alert and Discord Scheduled Events (more suites are added below as features land).
 
 Run:  python -I tests/test_v113.py        (or python tests/run_all.py for every suite)
 """
@@ -1278,6 +1278,223 @@ check("/config show says it's off again", "Low-signup alert:** off" in text(i), 
 after = short_raid("After off", hours_ahead=2)
 run(B._run_lowsignup(int(time.time())))
 check("with it off nothing more is posted", len(alert.sent) == sent + 1 and db.event(after)["low_alerted"] == 0)
+
+# ------------------------------------------------------------ Discord Scheduled Events
+print("Discord Scheduled Events for raids (/alerts events)")
+for e in db.upcoming_events(G, 0):
+    db.delete_event(e["id"])
+ES = discord.EventStatus
+HTTP500 = discord.HTTPException(types.SimpleNamespace(status=500, reason="x"), "boom")
+
+
+class FakeSched:
+    def __init__(self, guild, sid, **k):
+        self.guild, self.id, self.status = guild, sid, ES.scheduled
+        for key in ("name", "start_time", "end_time", "location", "description"):
+            setattr(self, key, k.get(key))
+        self.kwargs = k
+
+    async def edit(self, reason=None, **k):
+        self.guild.calls.append(("edit", self.id, sorted(k)))
+        for key, v in k.items():
+            setattr(self, key, v)
+
+    async def start(self, reason=None):
+        self.guild.calls.append(("start", self.id)); self.status = ES.active
+
+    async def end(self, reason=None):
+        self.guild.calls.append(("end", self.id)); self.status = ES.completed
+
+    async def cancel(self, reason=None):
+        self.guild.calls.append(("cancel", self.id)); self.status = ES.cancelled
+
+    async def delete(self, reason=None):
+        if self.guild.fail:
+            raise self.guild.fail
+        self.guild.calls.append(("delete", self.id)); self.guild.events.pop(self.id, None)
+
+
+class FakeGuild:
+    def __init__(self, manage=True):
+        self.id, self.events, self.calls, self.fail, self.next = G, {}, [], None, 8000
+        self.default_role, self.roles = EVERY_R, [EVERY_R, RAIDER_R]
+        self.me = types.SimpleNamespace(guild_permissions=types.SimpleNamespace(manage_events=manage, administrator=False))
+
+    def get_scheduled_event(self, sid): return self.events.get(sid)
+
+    async def fetch_scheduled_event(self, sid):
+        if sid in self.events:
+            return self.events[sid]
+        raise NOT_FOUND
+
+    async def create_scheduled_event(self, reason=None, **k):
+        if self.fail:
+            raise self.fail
+        self.next += 1
+        self.events[self.next] = FakeSched(self, self.next, **k)
+        self.calls.append(("create", self.next))
+        return self.events[self.next]
+
+
+guild = FakeGuild()
+B.bot.get_guild = lambda gid: guild if gid == G else None
+CH[51] = RoleChannel(51, {EVERY_R, RAIDER_R}); CH[51].name = "raids"  # everyone can see it
+CH[52] = RoleChannel(52, {RAIDER_R})  # raiders only: no event, ever
+
+
+def sched_raid(title, channel=51, hours_ahead=26, description="Bring flasks"):
+    eid = db.create_event(G, channel, title, description, int(time.time()) + hours_ahead * 3600, 1, 2, 5, 18)
+    db.set_message_id(eid, 5500 + eid)
+    return eid
+
+
+def sid(eid): return db.event(eid)["sched_event_id"]
+def sched_of(eid): return guild.events.get(sid(eid))
+def tick(at=None): run(B._run_sched(int(time.time()) if at is None else at))
+
+
+def then_background(coro):
+    """Run a command and then the background syncs it started (sched_soon), the way the bot's loop would."""
+    async def go():
+        out = await coro
+        await asyncio.gather(*list(B._sched_tasks))
+        return out
+    return run(go())
+
+
+check("it's off by default", db.setting(G, "sched_events") is None and not B.sched_events_on(G))
+i = inter(officer)
+run(B.config_show.callback(i))
+check("/config show says it's off", "Discord events for raids:** off" in text(i), text(i))
+ony = sched_raid("Off for now")
+tick()
+check("while off no event is made", not guild.calls and sid(ony) == 0)
+run(B.post_event(CH[51], guild, 1, "Posted while off", "", int(time.time()) + 86400, 2, 5, 18))
+run(asyncio.sleep(0))
+check("posting a raid while off makes no event either", not guild.calls)
+
+i = inter(officer); i.guild = guild
+run(B.alerts_events.callback(i, True))
+check("turning it on saves the switch, privately confirmed", B.sched_events_on(G) and i.response.sent[0][1].get("ephemeral") is True
+      and "Events" in text(i) and "Manage Events" not in text(i), text(i))
+i = inter(officer)
+run(B.config_show.callback(i))
+check("/config show describes it", "Discord events for raids:** on, 3 hours long" in text(i), text(i))
+
+public = sched_raid("Karazhan")
+private = sched_raid("Raiders-only night", channel=52)
+unposted = db.create_event(G, 51, "Not posted yet", "", int(time.time()) + 86400, 1, 2, 5, 18)
+tick()
+se = sched_of(public)
+check("each upcoming raid in a public channel gets an event within a minute", se is not None and sched_of(ony) is not None)
+check("a raid in a channel some members can't see gets none", sid(private) == 0, sid(private))
+check("a raid without a post yet gets none", sid(unposted) == 0)
+ev = db.event(public)
+check("the event is an external, members-only event with the raid's title and time",
+      se.kwargs.get("name") == "Karazhan" and se.start_time.timestamp() == ev["start_ts"]
+      and (se.end_time - se.start_time) == timedelta(hours=3), se.kwargs)
+check("its location is the link to the post, and the description keeps the raid's text",
+      se.location == f"https://discord.com/channels/{G}/51/{ev['message_id']}" and se.description.startswith("Bring flasks")
+      and "#raids" in se.description and len(se.location) <= 100, (se.location, se.description))
+calls = len(guild.calls)
+tick()
+check("nothing changed: the event isn't touched again", len(guild.calls) == calls, guild.calls[calls:])
+
+i = inter(officer)
+then_background(B.raid_edit.callback(i, public, title="Karazhan (alts)", date="+3d 20:00", notify=False))
+se = sched_of(public)
+check("editing the raid updates its event (title and time)", se.name == "Karazhan (alts)"
+      and se.start_time.timestamp() == db.event(public)["start_ts"] and any(c[0] == "edit" for c in guild.calls[calls:]),
+      guild.calls[calls:])
+
+posted, _, _ = then_background(B.post_event(CH[51], guild, 1, "Gruul", "", int(time.time()) + 86400, 2, 5, 18))
+check("a newly posted raid gets its event straight away", sched_of(posted) is not None)
+
+i = inter(officer)
+cancelled_sid = sid(public)
+run(B.raid_cancel.callback(i, public))
+check("cancelling the raid deletes its event", cancelled_sid not in guild.events and ("delete", cancelled_sid) in guild.calls)
+i = inter(officer)
+then_background(B.raid_restore.callback(i, public))
+check("restoring it makes a new event", sid(public) > 0 and sid(public) != cancelled_sid and sched_of(public) is not None,
+      sid(public))
+
+st = db.event(public)["start_ts"]
+tick(st + 30)
+check("when the raid starts, its event starts", sched_of(public).status == ES.active and ("start", sid(public)) in guild.calls)
+done = sid(public)
+tick(st + 3 * 3600 + 30)
+check("after `length` hours the event ends and the bot lets it go", ("end", done) in guild.calls and sid(public) == -1)
+calls = len(guild.calls)
+tick(st + 4 * 3600)
+check("an ended event isn't touched again", len(guild.calls) == calls)
+
+hand = sched_raid("Deleted by hand")
+tick()
+guild.events.pop(sid(hand))
+tick()
+check("an event deleted by hand isn't made again", sid(hand) == -1 and not any(c[0] == "create" for c in guild.calls[calls + 1:]))
+
+CH[53] = RoleChannel(53, {EVERY_R, RAIDER_R})
+moving = sched_raid("Goes private", channel=53)
+tick()
+gone = sid(moving)
+CH[53].seen_by = {RAIDER_R}
+tick()
+check("a raid whose channel becomes private loses its event", gone > 0 and gone not in guild.events and sid(moving) == 0)
+
+flaky = sched_raid("Flaky")
+guild.fail = HTTP500
+for n in range(4):
+    tick()
+check("a failed create is retried next minute", sid(flaky) == 0)
+guild.fail = None
+tick()
+check("and goes through once Discord works again", sid(flaky) > 0)
+
+stuck = sched_raid("Stuck")
+guild.fail = HTTP500
+for n in range(B.SCHED_MAX_FAILS):
+    tick()
+check("after repeated failures the bot stops trying, so it doesn't log an error every minute", sid(stuck) == -1)
+guild.fail = None
+
+nope = FakeGuild(manage=False)
+B.bot.get_guild = lambda gid: nope if gid == G else None
+i = inter(officer); i.guild = nope
+run(B.alerts_events.callback(i, True, 4))
+check("without Manage Events the admin is told what to give the bot", "Manage Events" in text(i) and B.sched_length(G) == 4, text(i))
+noperm = sched_raid("No permission")
+tick()
+check("and nothing is created or counted as an error until it has it", not nope.calls and sid(noperm) == 0)
+B.bot.get_guild = lambda gid: guild if gid == G else None
+tick()
+check("once it has the permission the event is made", sid(noperm) > 0)
+
+before = {e["sched_event_id"] for e in db.sched_events_of(G)}
+i = inter(officer); i.guild = guild
+then_background(B.alerts_events.callback(i, False))
+check("turning it off deletes the events the bot made", before and not db.sched_events_of(G)
+      and all(("delete", x) in guild.calls for x in before) and not B.sched_events_on(G), (before, guild.calls[-5:]))
+check("and says so", "won't get Discord events" in text(i), text(i))
+calls = len(guild.calls)
+sched_raid("After off")
+tick()
+check("with it off no new events are made", len(guild.calls) == calls)
+
+print("a database from before this change gets the column")
+import sqlite3  # noqa: E402
+old_db = tmp / "old_sched.db"
+con = sqlite3.connect(old_db)
+con.execute("CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, channel_id INTEGER NOT NULL,"
+            " message_id INTEGER NOT NULL DEFAULT 0, title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',"
+            " start_ts INTEGER NOT NULL, creator_id INTEGER NOT NULL, cap_tank INTEGER NOT NULL DEFAULT 0,"
+            " cap_healer INTEGER NOT NULL DEFAULT 0, cap_dps INTEGER NOT NULL DEFAULT 0, closed INTEGER NOT NULL DEFAULT 0,"
+            " reminded INTEGER NOT NULL DEFAULT 0)")
+con.execute("INSERT INTO events(guild_id, channel_id, title, start_ts, creator_id) VALUES(1, 2, 'Old', 1, 3)")
+con.commit(); con.close()
+migrated = dbmod.DB(str(old_db))
+check("the migration adds sched_event_id with 0 for old raids", migrated.event(1)["sched_event_id"] == 0)
 
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

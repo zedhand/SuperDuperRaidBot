@@ -324,6 +324,7 @@ on any single date. `/always list` shows what you're in, and `/always leave` sto
 | Admins | `/config backup` | Sends you a private copy of the database as a file |
 | Admins | `/config board` | A pinned **Upcoming raids** message in a channel you pick, with each raid's time, signups per role and a link to its post. It updates by itself (default: off) |
 | Admins | `/alerts lowsignup` | Tell officers in a channel you pick when a raid is short of people a set number of hours before it starts (default: off) |
+| Admins | `/alerts events` | Put each raid in the server's **Events** list as a Discord Scheduled Event that follows the raid (default: off, needs **Manage Events**) |
 | Admins | `/config backupchannel` | Post a copy of this server's data in a private admin channel every day, so a backup lives off the bot's PC (default: off) |
 | Admins | `/status` | Health check: version, uptime, channel permissions, last backup, last problem |
 
@@ -349,6 +350,14 @@ on any single date. `/always list` shows what you're in, and `/always leave` sto
   channel can also see the raid's channel, so a private raid is never announced somewhere more public. A raid posted, or
   moved, to less than that many hours ahead isn't checked. `/alerts lowsignup 0` turns it off. (It lives under `/alerts`
   because Discord allows at most 25 commands under `/config`.)
+- `/alerts events on: True` gives every upcoming raid a Discord **Scheduled Event**, so it shows in the server's Events
+  list and members can press **Interested** to get Discord's own reminder on their phone. The event has the raid's title,
+  time and description, and links to the post (sign-ups still happen on the post). It is updated when the raid is edited,
+  deleted when it's cancelled, made again when it's restored, started when the raid starts and ended after `length` hours
+  (default 3). Every member can see the Events list, so only raids in a channel that everyone in the server can see get
+  an event: officer-only or team-only raids never do. The bot needs the **Manage Events** permission; without it nothing
+  is created and everything else works as before. An event deleted by hand isn't made again. `/alerts events on: False`
+  deletes the events the bot made.
 - `/config logchannel` posts a one-line note whenever a raid is created, edited, cancelled, closed or someone is marked a no-show.
 
 ### Who can do what

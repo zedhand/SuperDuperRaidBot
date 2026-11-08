@@ -1149,6 +1149,7 @@ async def post_event(channel, guild, creator_id: int, title: str, description: s
         raise
     db.set_message_id(event_id, msg.id)
     schedule_board(guild.id)
+    sched_soon(event_id)
     if autoclose_inside(guild.id, ts):
         db.update_event(event_id, autoclosed=1)  # posted inside the window: don't close it a minute later
     if lowsignup_inside(guild.id, ts):
@@ -1169,8 +1170,10 @@ async def post_event(channel, guild, creator_id: int, title: str, description: s
 
 
 async def delete_event_post(event) -> None:
-    """Delete the raid's post and its thread, ignoring anything already gone."""
+    """Delete the raid's post, its thread and its Discord Scheduled Event, ignoring anything already gone."""
     schedule_board(event["guild_id"])
+    if event["sched_event_id"] > 0:
+        await remove_sched_event(bot.get_guild(event["guild_id"]), event["sched_event_id"])
     channel = bot.get_channel(event["channel_id"])
     if channel and event["message_id"]:
         try:
@@ -1472,6 +1475,7 @@ async def raid_edit(interaction: discord.Interaction, event_id: int, title: Opti
                                       + ", ".join(sorted(k for k in fields if k not in ("reminded", "lock_shown", "nudged", "autoclosed", "low_alerted"))))
     await interaction.response.send_message(f"Updated event #{event_id}.", ephemeral=True)
     await update_event(event_id)  # a raised limit may free bench slots
+    sched_soon(event_id)  # the Scheduled Event (/alerts events) follows a new title, time or description
     if time_changed and notify:
         users = [x["user_id"] for x in db.signups(event_id) if x["status"] in ("in", "late", "tentative", "bench")]
         channel = bot.get_channel(event["channel_id"])
@@ -1824,6 +1828,7 @@ async def raid_restore(interaction: discord.Interaction, event_id: int):
             ephemeral=True)
     db.set_message_id(event_id, msg.id)
     schedule_board(interaction.guild_id)
+    sched_soon(event_id)
     notes = ""
     if json.loads(copy["event_json"]).get("thread_id"):  # it had a discussion thread: start a new one
         when = datetime.fromtimestamp(event["start_ts"], guild_tz(interaction.guild_id))
@@ -2439,6 +2444,181 @@ async def _run_lowsignup(now: int) -> None:
             db.update_event(event["id"], low_alerted=1)
 
 
+# ---------------------------------------------------------------- Discord Scheduled Events (/alerts events)
+SCHED_LENGTH_DEFAULT = 3  # hours a raid's Scheduled Event lasts unless /alerts events length says otherwise
+SCHED_KEEP_CHECKING = 2 * 86400  # how long after the start a raid's event is still looked after (to end it)
+SCHED_MAX_FAILS = 5
+_sched_fails: dict[int, int] = {}
+_sched_tasks: set = set()
+
+
+def sched_events_on(guild_id: int) -> bool:
+    return db.setting(guild_id, "sched_events") == "1"
+
+
+def sched_length(guild_id: int) -> int:
+    return int_setting(guild_id, "sched_events_hours", SCHED_LENGTH_DEFAULT) or SCHED_LENGTH_DEFAULT
+
+
+def sched_can_show(guild, raid_channel_id: int) -> bool:
+    """Every member of the server can see its Scheduled Events, so a raid gets one only if every role (@everyone
+    included) can see the raid's channel. A raid in an officers-only or team-only channel never gets one."""
+    channel = bot.get_channel(raid_channel_id) if guild is not None else None
+    if channel is None:
+        return False
+    roles = getattr(guild, "roles", None) or [guild.default_role]
+    return all(channel.permissions_for(r).view_channel for r in roles)
+
+
+def sched_can_manage(guild) -> bool:
+    perms = getattr(getattr(guild, "me", None), "guild_permissions", None)
+    return bool(perms and (perms.manage_events or perms.administrator))
+
+
+def sched_fields(event) -> dict:
+    """What the raid's Scheduled Event should say: its title, times, a link to the post as the location, and the
+    raid's description."""
+    g, start = event["guild_id"], datetime.fromtimestamp(event["start_ts"], timezone.utc)
+    link = f"https://discord.com/channels/{g}/{event['channel_id']}/{event['message_id']}"
+    channel = bot.get_channel(event["channel_id"])
+    where = f"#{channel.name}" if channel is not None else "the raid channel"
+    text = (event["description"] or "").strip()
+    text = (text[:850] + "\n\n" if text else "") + f"Sign up on the raid post in {where}: {link}"
+    return {"name": event["title"][:100], "start_time": start, "end_time": start + timedelta(hours=sched_length(g)),
+            "location": link[:100], "description": text[:1000]}
+
+
+async def _sched_get(guild, sid: int):
+    """The Scheduled Event with this id, or None if it was deleted (by hand, or by Discord after it ended)."""
+    found = guild.get_scheduled_event(sid)
+    if found is not None:
+        return found
+    try:
+        return await guild.fetch_scheduled_event(sid)
+    except discord.NotFound:
+        return None
+
+
+async def remove_sched_event(guild, sid: int) -> bool:
+    """Delete one Scheduled Event, ignoring one that's already gone. False means it could not be deleted."""
+    if guild is None or not sid or sid < 0:
+        return True
+    target = guild.get_scheduled_event(sid)
+    try:
+        if target is None:
+            target = await guild.fetch_scheduled_event(sid)
+        await target.delete(reason="Raid cancelled or no longer shown (/alerts events)")
+    except discord.NotFound:
+        return True
+    except discord.HTTPException as e:
+        log.warning("Could not delete Scheduled Event %s in guild %s: %s", sid, guild.id, e)
+        return False
+    return True
+
+
+async def sync_sched_event(event_id: int, now: Optional[int] = None):
+    """Bring one raid's Discord Scheduled Event in line with the raid: create it, update its title, time or
+    description, start it when the raid starts and end it when the raid is over, or delete it when it shouldn't
+    exist (switched off, private channel, raid gone). True when done, False to try again, WAIT without Manage Events."""
+    now = int(time.time()) if now is None else now
+    event = db.event(event_id)
+    if not event:
+        return True  # cancelled: delete_event_post took its Scheduled Event with it
+    g, sid = event["guild_id"], event["sched_event_id"]
+    if sid < 0:
+        return True  # ended, or deleted by hand: hands off
+    guild = bot.get_guild(g)
+    if guild is None:
+        return WAIT
+    if not sched_can_manage(guild):
+        return WAIT  # without Manage Events nothing can be done; it starts working once the permission is given
+    end_ts = event["start_ts"] + sched_length(g) * 3600
+    wanted = sched_events_on(g) and event["message_id"] and sched_can_show(guild, event["channel_id"])
+    try:
+        if not wanted:
+            if sid and not await remove_sched_event(guild, sid):
+                return _sched_failed(event_id)
+            if sid:
+                db.update_event(event_id, sched_event_id=0)
+            return True
+        if not sid:
+            if event["start_ts"] <= now + 60:
+                return True  # already started (or about to): too late for a Scheduled Event
+            made = await guild.create_scheduled_event(entity_type=discord.EntityType.external,
+                                                      privacy_level=discord.PrivacyLevel.guild_only,
+                                                      reason=f"Raid #{event_id} (/alerts events)",
+                                                      **sched_fields(event))
+            db.update_event(event_id, sched_event_id=made.id)
+            return _sched_ok(event_id)
+        se = await _sched_get(guild, sid)
+        if se is None or se.status in (discord.EventStatus.completed, discord.EventStatus.cancelled):
+            db.update_event(event_id, sched_event_id=-1)  # deleted by hand, or over: never recreate it
+            return _sched_ok(event_id)
+        want = sched_fields(event)
+        if se.status == discord.EventStatus.scheduled:
+            if now >= end_ts:
+                await se.cancel(reason="The raid is over")
+                db.update_event(event_id, sched_event_id=-1)
+            elif event["start_ts"] <= now:
+                await se.start(reason="The raid is starting")
+            else:
+                changed = {k: v for k, v in want.items() if (getattr(se, k, None) or "") != v}
+                if changed:
+                    await se.edit(**changed, reason="Raid edited")
+        elif se.status == discord.EventStatus.active:
+            if now >= end_ts:
+                await se.end(reason="The raid is over")
+                db.update_event(event_id, sched_event_id=-1)
+            else:
+                changed = {k: want[k] for k in ("name", "description") if (getattr(se, k, None) or "") != want[k]}
+                if changed:
+                    await se.edit(**changed, reason="Raid edited")
+    except discord.HTTPException as e:
+        log.warning("Scheduled Event for raid %s: %s", event_id, e)
+        note_error(f"Discord Scheduled Event for raid #{event_id}: {e}")
+        return _sched_failed(event_id)
+    return _sched_ok(event_id)
+
+
+def _sched_ok(event_id: int) -> bool:
+    _sched_fails.pop(event_id, None)
+    return True
+
+
+def _sched_failed(event_id: int) -> bool:
+    """False (try again next minute), until a raid has failed SCHED_MAX_FAILS times in a row: then its Scheduled
+    Event is left alone for good, so a stuck one doesn't log an error every minute."""
+    _sched_fails[event_id] = _sched_fails.get(event_id, 0) + 1
+    if _sched_fails[event_id] < SCHED_MAX_FAILS:
+        return False
+    _sched_fails.pop(event_id, None)
+    log.error("Giving up on the Scheduled Event for raid #%s", event_id)
+    db.update_event(event_id, sched_event_id=-1)
+    return True
+
+
+def sched_soon(event_id: int) -> None:
+    """Sync a raid's Scheduled Event in the background now, instead of waiting for the next minute. Does nothing
+    when the feature is off and the raid has no Scheduled Event."""
+    event = db.event(event_id)
+    if not event or not (sched_events_on(event["guild_id"]) or event["sched_event_id"] > 0):
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    task = loop.create_task(_attempt("scheduled event", event_id, partial(sync_sched_event, event_id)))
+    _sched_tasks.add(task)
+    task.add_done_callback(_sched_tasks.discard)
+
+
+async def _run_sched(now: int) -> None:
+    on = set(db.guilds_with_key("sched_events"))
+    for event in db.sched_candidates(now, now - SCHED_KEEP_CHECKING):
+        if event["sched_event_id"] > 0 or event["guild_id"] in on:
+            await _attempt("scheduled event", event["id"], partial(sync_sched_event, event["id"], now))
+
+
 async def _run_locks(now: int) -> None:
     for event in db.due_lock(now):  # start time passed: show "This event is closed."
         if await _attempt("lock", event["id"], partial(refresh_message, event["id"])):
@@ -2473,7 +2653,7 @@ async def _run_nudges(now: int) -> None:
 async def reminder_loop():
     now = int(time.time())
     for step in (_run_autoclose, _run_locks, _run_voicecheck, _run_repeats, _run_archive, _run_reminders, _run_nudges,
-                 _run_lowsignup, _run_digest, _run_backuppost, _run_board, _run_updatecheck):
+                 _run_lowsignup, _run_sched, _run_digest, _run_backuppost, _run_board, _run_updatecheck):
         try:
             await step(now)
         except Exception as e:  # e.g. a database error: log it, and still run the other steps
@@ -3096,6 +3276,7 @@ async def config_show(interaction: discord.Interaction):
     nudge_text = f"{plural(nudge, 'hour')} before" if nudge else "off"
     lines.append(f"**Unanswered reminder:** {nudge_text}")
     lines.append(f"**Low-signup alert:** {lowsignup_text(g)}")
+    lines.append(f"**Discord events for raids:** {sched_text(g)}")
     log_ch = db.setting(g, "log_channel")
     lines.append(f"**Log channel:** {f'<#{log_ch}>' if log_ch else 'none'}")
     archive = int(db.setting(g, "archive_days", 0))
@@ -3238,6 +3419,41 @@ async def alerts_lowsignup(interaction: discord.Interaction, hours: app_commands
         f"{' and mention its officer role' if ping_officers else ''}. Raids in a channel that some readers of "
         f"{target.mention} can't see are never mentioned there, and a raid posted less than {plural(hours, 'hour')} "
         "ahead isn't checked.", ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+
+def sched_text(g: int) -> str:
+    if not sched_events_on(g):
+        return "off"
+    return f"on, {plural(sched_length(g), 'hour')} long"
+
+
+@alerts.command(name="events", description="Add each raid to the server's Events list as a Discord Scheduled Event (default: off)")
+@app_commands.describe(on="True: every new or upcoming raid gets an event. False: the bot deletes the events it made",
+                       length="How many hours each event lasts (default 3; kept from last time if left empty)")
+async def alerts_events(interaction: discord.Interaction, on: bool,
+                        length: Optional[app_commands.Range[int, 1, 12]] = None):
+    g = interaction.guild_id
+    if not on:
+        db.set_setting(g, "sched_events", None)
+        made = db.sched_events_of(g)
+        await interaction.response.send_message(
+            "Raids won't get Discord events any more." + (f" I'm deleting the {plural(len(made), 'event')} I made."
+                                                          if made else ""), ephemeral=True)
+        for event in made:  # the reply comes first: deleting many events can take longer than Discord waits
+            sched_soon(event["id"])
+        return
+    db.set_setting(g, "sched_events", "1")
+    if length is not None:
+        db.set_setting(g, "sched_events_hours", length)
+    hours = sched_length(g)
+    lacking = "" if sched_can_manage(interaction.guild) else (
+        "\n⚠️ I don't have the **Manage Events** permission yet, so nothing will appear until a server admin gives it "
+        "to my role (Server Settings → Roles). Everything else keeps working without it.")
+    await interaction.response.send_message(
+        f"Every upcoming raid will appear in the server's **Events** list within a minute, as a {plural(hours, 'hour')} "
+        "event linking to its post, and follows the raid when it's edited, cancelled, restored or starts. Members can press "
+        "**Interested** there to get Discord's own reminder. Only raids in a channel that everyone in the server can see "
+        "get an event, because every member can see the Events list." + lacking, ephemeral=True)
 
 
 @config.command(name="raiderrole", description="Only members with this role can sign up (leave empty: anyone can)")
@@ -3555,10 +3771,10 @@ async def help_command(interaction: discord.Interaction):
         "`/config officer` who can manage every raid · `/config pingrole` default role to ping\n"
         "`/config channel` per-channel (or category) ping role and raid leaders\n"
         "`/config threads` discussion thread per raid · `/config archive` delete old posts\n"
-        "`/config nudge` ping people who haven't answered · `/alerts lowsignup` tell officers a raid is short · `/config logchannel` activity log\n"
+        "`/config nudge` ping people who haven't answered · `/alerts lowsignup` tell officers a raid is short · `/alerts events` Discord events · `/config logchannel` activity log\n"
         "`/config raiderrole` only that role can sign up · `/config autoclose` close sign-ups before the start\n"
         "`/config voicechannel` automatic no-shows from a voice channel · `/config buffs` warn about missing Bloodlust / battle res\n"
-        "`/config digest` weekly attendance summary. Officers can also limit classes: `/raid create classes: Mage 4`\n"
+        "`/config digest` weekly attendance summary. Officers can limit classes: `/raid create classes: Mage 4`\n"
         "`/config setup` guided panel for the main settings · `/config raiderio` · `/config updatenotice` · `/config confirm` · `/config realms` · `/config notes`\n"
         "`/config backup` get a copy of the database · `/status` bot health check"))
     embed.set_footer(text="Anyone on the bench is moved in automatically when a slot opens.")

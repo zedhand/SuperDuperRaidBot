@@ -308,6 +308,7 @@ on any single date. `/always list` shows what you're in, and `/always leave` sto
 | Admins | `/config raiderio` | Allow `/character import` (retail only, default: off) and set a default region and realm |
 | Admins | `/config updatenotice` | Say in the log channel when a newer version is released (default: off) |
 | Admins | `/config backup` | Sends you a private copy of the database as a file |
+| Admins | `/config backupchannel` | Post a copy of this server's data in a private admin channel every day, so a backup lives off the bot's PC (default: off) |
 | Admins | `/status` | Health check: version, uptime, channel permissions, last backup, last problem |
 
 **Extras explained**
@@ -477,6 +478,13 @@ kept for `/raid restore`. The bot asks first, then takes their name off the raid
 backups still hold the old data until they're replaced (within 7 days), as does any copy an admin made with `/config backup`.
 
 Admins can get a copy of the database any time with `/config backup` (it contains your members' Discord IDs, so keep it private). If `raidbot.db` is ever damaged, the bot restores the newest healthy daily backup on the next start, keeps the damaged file as `raidbot.db.damaged-<time>`, and `/status` tells you it happened. If there is no healthy backup it stops and explains, leaving the file untouched. Errors are also written to `raidbot.log` (the newest 5 MB are kept).
+
+To keep a backup somewhere other than the bot's PC, `/config backupchannel` picks a channel where the bot posts a copy every
+day after 04:00 (server time), starting right away. It refuses a channel that everyone in the server can see, and skips the
+post if the channel is made public later. The copy holds only that server's data (other servers the bot is in are left out),
+and the bot deletes its own older posts so the newest 7 stay. Leave the channel empty to turn it off. To restore from one, stop
+the bot and put the file in place of `raidbot.db`; if the bot runs in more than one server, use the `backups` folder instead,
+since the posted copy only has one server's data.
 
 ## Class icons
 

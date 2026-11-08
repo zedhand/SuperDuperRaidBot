@@ -1,5 +1,5 @@
 """Offline tests for v1.13/v1.14: the WoW version presets, confirm/undo for /raid cancel and /raid remove, /forgetme,
-the daily backup post, realms on characters, signup notes, the Spec button, /raid promote and the invite export in /raid roster (more suites are added below as features land).
+the daily backup post, realms on characters, signup notes, the Spec button, /raid promote, the invite export in /raid roster and the Upcoming raids board (more suites are added below as features land).
 
 Run:  python -I tests/test_v113.py        (or python tests/run_all.py for every suite)
 """
@@ -957,6 +957,190 @@ empty = db.create_event(G, 11, "Empty night", "", int(time.time()) + 86400, 1, 0
 i = inter(officer)
 run(B.raid_roster.callback(i, empty, True))
 check("nobody in yet: a plain sentence, no empty block", "nobody to invite" in text(i) and "```" not in text(i), text(i))
+
+print("the Upcoming raids board (/config board)")
+for e in db.upcoming_events(G, 0):  # start from a server with no raids
+    db.delete_event(e["id"])
+EVERY_R, RAIDER_R, BOT_ME = "@everyone role", "Raider role", object()
+NOT_FOUND = discord.NotFound(types.SimpleNamespace(status=404, reason="x"), "unknown message")
+
+
+class RoleChannel(FakeChannel):
+    """A channel that some roles can see and others can't, where the bot may lack a permission."""
+    def __init__(self, cid, seen_by, embed=True, can_pin=True):
+        super().__init__(cid)
+        self.seen_by, self.embed, self.can_pin, self.pins, self.gone = seen_by, embed, can_pin, [], set()
+        self.guild = types.SimpleNamespace(id=G, me=BOT_ME, default_role=EVERY_R, roles=[EVERY_R, RAIDER_R],
+                                           get_role=lambda r: None, get_member=lambda u: None)
+
+    def permissions_for(self, who):
+        if who is BOT_ME:
+            return types.SimpleNamespace(view_channel=True, send_messages=True, embed_links=self.embed)
+        return types.SimpleNamespace(view_channel=who in self.seen_by)
+
+    def get_partial_message(self, mid):
+        msg = FakeMsg(self, mid)
+        if mid in self.gone:
+            async def missing(**k): raise NOT_FOUND
+            msg.edit = missing
+        return msg
+
+
+async def fake_pin(self, **k):
+    if getattr(self.ch, "can_pin", True) is False:
+        raise discord.Forbidden(types.SimpleNamespace(status=403, reason="x"), "missing permissions")
+    self.ch.pins.append(self.id)
+FakeMsg.pin = fake_pin
+
+CH[31] = RoleChannel(31, {EVERY_R, RAIDER_R})  # a public board channel
+CH[32] = RoleChannel(32, {RAIDER_R})  # raiders only
+CH[33] = RoleChannel(33, {EVERY_R, RAIDER_R}, embed=False)
+CH[34] = RoleChannel(34, {EVERY_R, RAIDER_R}, can_pin=False)
+board = CH[31]
+
+
+def board_text(ch=board):
+    """The board as last drawn in this channel: an edit of the current message, or else what was sent."""
+    mid = int(db.setting(G, "board_message") or 0)
+    edits = [k for m, k in ch.edits if m == mid]
+    if edits:
+        return edits[-1]["embed"].description
+    return ch.sent[-1][1]["embed"].description if ch.sent else ""
+
+
+check("the board is off by default", db.setting(G, "board_channel") is None)
+i = inter(officer)
+run(B.config_show.callback(i))
+check("/config show says it's off", "Upcoming raids board:** off" in text(i), text(i))
+i = inter(officer)
+run(B.config_board.callback(i, CH[33]))
+check("a channel where the bot can't embed links is refused", db.setting(G, "board_channel") is None
+      and "Embed Links" in text(i) and not CH[33].sent, text(i))
+
+i = inter(officer)
+run(B.config_board.callback(i, board))
+check("turning it on posts the board, privately confirmed", db.setting(G, "board_channel") == "31" and len(board.sent) == 1
+      and i.response.sent[0][1].get("ephemeral") is True, text(i))
+first = int(db.setting(G, "board_message"))
+check("the board message is remembered and pinned", board.pins == [first] and "pinned" in text(i), (board.pins, first))
+check("with no raids it says so", "No raids planned" in board_text(), board_text())
+check("the post pings nobody", board.sent[0][1]["allowed_mentions"].everyone is False)
+i = inter(officer)
+run(B.config_show.callback(i))
+check("/config show names the channel", "Upcoming raids board:** <#31>" in text(i), text(i))
+
+kara = new_raid("Karazhan")
+secret = db.create_event(G, 32, "Raiders-only night", "", int(time.time()) + 2 * 86400, 1, 2, 5, 18)
+db.set_message_id(secret, 4242)
+unposted = db.create_event(G, 11, "Not posted yet", "", int(time.time()) + 3 * 86400, 1, 2, 5, 18)
+run(B.draw_board(G))
+t = board_text()
+check("a new raid shows up on the board by editing the same message", len(board.sent) == 1 and board.edits[-1][0] == first
+      and "Karazhan" in t, t)
+check("each raid has its time, a link to its post and the counts per role",
+      f"<t:{db.event(kara)['start_ts']}:f>" in t and f"/channels/{G}/11/{500 + kara}" in t and "1 in" in t
+      and "💚 1/5" in t and "🛡️ 0/2" in t and "1 bench" in t, t)
+check("players don't see raid ids on the board", f"#{kara} " not in t, t)
+check("a raid in a channel some board readers can't see is left off", "Raiders-only" not in t, t)
+check("a raid without a post yet is left off", "Not posted yet" not in t, t)
+edits = len(board.edits)
+run(B.draw_board(G))
+check("nothing changed: the board isn't edited again", len(board.edits) == edits)
+
+db.set_signup(kara, 53, "Garrosh", "Warrior", "Protection", "tank", "in", None)
+run(B.draw_board(G))
+check("a signup changes the counts", len(board.edits) == edits + 1 and "2 in" in board_text() and "🛡️ 1/2" in board_text(),
+      board_text())
+
+i = inter(officer)
+run(B.config_board.callback(i, board))
+check("running it again replaces the board (to bring back a deleted one)", first in board.deleted and len(board.sent) == 2
+      and int(db.setting(G, "board_message")) != first)
+check("and says how many raids are left off and why", "1 upcoming raid is left off" in text(i), text(i))
+
+CH[35] = RoleChannel(35, {RAIDER_R})
+i = inter(officer)
+run(B.config_board.callback(i, CH[35]))
+check("on a raiders-only board the raiders-only raid is listed", "Raiders-only night" in board_text(CH[35])
+      and "left off" not in text(i), board_text(CH[35]))
+check("moving the board deletes the old one", len(board.deleted) == 2 and db.setting(G, "board_channel") == "35",
+      board.deleted)
+i = inter(officer)
+run(B.config_board.callback(i, board))
+
+print("the board keeps itself up to date")
+B.BOARD_DELAY = 0
+edits = len(board.edits)
+
+
+async def several_changes():
+    for _ in range(5):
+        B.schedule_board(G)
+    db.set_signup(kara, 54, "Anduin", "Priest", "Holy", "healer", "in", None)
+    await asyncio.sleep(0.05)
+run(several_changes())
+check("a rush of changes costs one edit", len(board.edits) == edits + 1 and "💚 2/5" in board_text(), board_text())
+
+edits = len(board.edits)
+
+
+async def redraw_then_wait(eid):
+    await B.refresh_message(eid)
+    await asyncio.sleep(0.05)
+db.set_signup(kara, 55, "Sylvanas", "Hunter", "Marksmanship", "dps", "in", None)
+run(redraw_then_wait(kara))
+check("redrawing a raid post also updates the board", len(board.edits) == edits + 1 and "4 in" in board_text(), board_text())
+
+later = new_raid("Gruul")
+db.update_event(later, start_ts=int(time.time()) + 5 * 86400)
+i = inter(officer)
+
+
+async def cancel_then_wait(eid):
+    await B.raid_cancel.callback(i, eid)
+    await asyncio.sleep(0.05)
+run(B.draw_board(G))
+check("a second raid is listed, in start order", board_text().index("Karazhan") < board_text().index("Gruul"), board_text())
+run(cancel_then_wait(later))
+check("cancelling a raid takes it off the board", db.event(later) is None and "Gruul" not in board_text(), board_text())
+
+db.update_event(kara, start_ts=int(time.time()) - 60)
+run(B._run_board(int(time.time())))
+check("once a raid has started the minute check takes it off", "Karazhan" not in board_text()
+      and "No raids planned" in board_text(), board_text())
+
+board.gone.add(int(db.setting(G, "board_message")))
+db.update_event(kara, start_ts=int(time.time()) + 86400)
+sent = len(board.sent)
+run(B.draw_board(G))
+check("a board deleted by hand is posted again and pinned", len(board.sent) == sent + 1
+      and int(db.setting(G, "board_message")) == board.pins[-1] and "Karazhan" in board_text(), board.pins)
+
+for n in range(17):
+    e = db.create_event(G, 11, f"Alt run {n}", "", int(time.time()) + 7 * 86400 + n, 1, 0, 0, 0)
+    db.set_message_id(e, 8000 + n)
+run(B.draw_board(G))
+check("the board lists 15 raids and counts the rest", board_text().count("/channels/") == 15
+      and "3 more raids after these" in board_text() and len(board_text()) <= 4000, board_text()[-200:])
+
+i = inter(officer)
+run(B.config_board.callback(i, CH[34]))
+check("if the bot can't pin, the board still goes up and the admin is told how to fix it",
+      db.setting(G, "board_channel") == "34" and CH[34].sent and "Manage Messages" in text(i), text(i))
+last = int(db.setting(G, "board_message"))
+i = inter(officer)
+run(B.config_board.callback(i, None))
+check("turning it off deletes the board and the settings", db.setting(G, "board_channel") is None
+      and db.setting(G, "board_message") is None and last in CH[34].deleted and "off" in text(i), text(i))
+edits = len(CH[34].edits)
+
+
+async def change_with_board_off():
+    B.schedule_board(G)
+    await asyncio.sleep(0.05)
+run(change_with_board_off())
+run(B._run_board(int(time.time())))
+check("with the board off nothing is drawn", len(CH[34].edits) == edits and len(CH[34].sent) == 1)
 
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

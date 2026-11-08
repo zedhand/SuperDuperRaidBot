@@ -371,6 +371,7 @@ async def _redraw(event_id: int) -> bool:
         log.warning("Could not edit event %s message: %s", event_id, e)
         note_error(f"could not edit the post for raid #{event_id}: {e}")
         return False
+    schedule_board(event["guild_id"])  # signups, title or time changed: the board's counts follow
     return True
 
 
@@ -1147,6 +1148,7 @@ async def post_event(channel, guild, creator_id: int, title: str, description: s
         db.delete_event(event_id)
         raise
     db.set_message_id(event_id, msg.id)
+    schedule_board(guild.id)
     if autoclose_inside(guild.id, ts):
         db.update_event(event_id, autoclosed=1)  # posted inside the window: don't close it a minute later
     notes = []
@@ -1166,6 +1168,7 @@ async def post_event(channel, guild, creator_id: int, title: str, description: s
 
 async def delete_event_post(event) -> None:
     """Delete the raid's post and its thread, ignoring anything already gone."""
+    schedule_board(event["guild_id"])
     channel = bot.get_channel(event["channel_id"])
     if channel and event["message_id"]:
         try:
@@ -1478,6 +1481,24 @@ async def raid_edit(interaction: discord.Interaction, event_id: int, title: Opti
                 pass
 
 
+def raid_line(e, show_id: bool = True) -> str:
+    """Two lines about one raid: linked title, time, channel, then who's coming per role (for /raid list and the board)."""
+    signups = db.signups(e["id"])
+    attending = [x for x in signups if x["status"] in ("in", "late")]
+    by_role = {r: sum(1 for x in attending if x["role"] == r) for r in wd.ROLES}
+
+    def part(letter: str, role: str) -> str:
+        cap = e[f"cap_{role}"]
+        return f"{letter} {by_role[role]}/{cap}" if cap else f"{letter} {by_role[role]}"
+
+    others = {st: sum(1 for x in signups if x["status"] == st) for st in ("tentative", "bench")}
+    extra = "".join(f" · {n} {st}" for st, n in others.items() if n) + (" · 🔒 closed" if e["closed"] else "")
+    link = f"https://discord.com/channels/{e['guild_id']}/{e['channel_id']}/{e['message_id']}"
+    name = f"#{e['id']} {e['title']}" if show_id else e["title"]
+    return (f"[**{name}**]({link}) · <t:{e['start_ts']}:f> (<t:{e['start_ts']}:R>) · <#{e['channel_id']}>\n"
+            f"👥 {len(attending)} in · {part('🛡️', 'tank')} · {part('💚', 'healer')} · {part('⚔️', 'dps')}{extra}")
+
+
 @raid.command(name="list", description="Upcoming raids you can manage, with sign-up counts and links")
 async def raid_list(interaction: discord.Interaction):
     now = int(time.time())
@@ -1485,21 +1506,7 @@ async def raid_list(interaction: discord.Interaction):
             if e["message_id"] and can_manage_channel(interaction, e["channel_id"])]
     if not rows:
         return await interaction.response.send_message("No upcoming raids that you can manage.", ephemeral=True)
-    lines = []
-    for e in rows[:15]:
-        attending = [x for x in db.signups(e["id"]) if x["status"] in ("in", "late")]
-        by_role = {r: sum(1 for x in attending if x["role"] == r) for r in wd.ROLES}
-
-        def part(letter: str, role: str) -> str:
-            cap = e[f"cap_{role}"]
-            return f"{letter} {by_role[role]}/{cap}" if cap else f"{letter} {by_role[role]}"
-
-        others = {st: sum(1 for x in db.signups(e["id"]) if x["status"] == st) for st in ("tentative", "bench")}
-        extra = "".join(f" · {n} {st}" for st, n in others.items() if n) + (" · 🔒 closed" if e["closed"] else "")
-        link = f"https://discord.com/channels/{e['guild_id']}/{e['channel_id']}/{e['message_id']}"
-        lines.append(f"[**#{e['id']} {e['title']}**]({link}) · <t:{e['start_ts']}:f> (<t:{e['start_ts']}:R>) · <#{e['channel_id']}>\n"
-                     f"👥 {len(attending)} in · {part('🛡️', 'tank')} · {part('💚', 'healer')} · {part('⚔️', 'dps')}{extra}")
-    text = "\n".join(lines)
+    text = "\n".join(raid_line(e) for e in rows[:15])
     if len(rows) > 15:
         text += f"\n…and {len(rows) - 15} more"
     await interaction.response.send_message(text[:2000], ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
@@ -1813,6 +1820,7 @@ async def raid_restore(interaction: discord.Interaction, event_id: int):
             f"I couldn't post in {channel.mention}, so the raid is still cancelled. Check my permissions there.",
             ephemeral=True)
     db.set_message_id(event_id, msg.id)
+    schedule_board(interaction.guild_id)
     notes = ""
     if json.loads(copy["event_json"]).get("thread_id"):  # it had a discussion thread: start a new one
         when = datetime.fromtimestamp(event["start_ts"], guild_tz(interaction.guild_id))
@@ -2224,6 +2232,140 @@ async def _run_backuppost(now: int) -> None:
             db.set_setting(g, "backup_post_last", day)
 
 
+# ---------------------------------------------------------------- the Upcoming raids board (/config board)
+BOARD_MAX = 15  # raids listed on the board; the rest are counted
+BOARD_DELAY = 3  # seconds to wait after a change, so a rush of signups costs one edit of the board
+_board_busy: dict[int, bool] = {}  # guild id -> "changed again while the board was being drawn"
+_board_drawn: dict[int, tuple] = {}  # guild id -> (message id, text) last shown, so an unchanged board isn't edited
+_board_soon: set[int] = set()  # guilds with a redraw already waiting
+_board_tasks: set = set()  # keeps the waiting redraws alive until they run
+
+
+def board_can_show(board_channel, raid_channel_id: int) -> bool:
+    """A raid goes on the board only if everyone who can read the board can also see the raid's channel (checked
+    role by role), so a raid in an officers-only or team-only channel never shows up on a public board."""
+    if raid_channel_id == board_channel.id:
+        return True
+    raid_channel = bot.get_channel(raid_channel_id)
+    if raid_channel is None:
+        return False
+    roles = getattr(board_channel.guild, "roles", None) or [board_channel.guild.default_role]
+    return not any(board_channel.permissions_for(r).view_channel and not raid_channel.permissions_for(r).view_channel
+                   for r in roles)
+
+
+def board_raids(guild_id: int, board_channel, now: int) -> tuple[list, int]:
+    """(raids to list, how many upcoming raids were left off because some board readers can't see their channel)."""
+    rows = [e for e in db.upcoming_events(guild_id, now) if e["message_id"]]
+    shown = [e for e in rows if board_can_show(board_channel, e["channel_id"])]
+    return shown, len(rows) - len(shown)
+
+
+def board_embed(guild_id: int, board_channel, now: int):
+    raids, _ = board_raids(guild_id, board_channel, now)
+    if raids:
+        text = "\n\n".join(raid_line(e, show_id=False) for e in raids[:BOARD_MAX])
+        if len(raids) > BOARD_MAX:
+            text += f"\n\n…and {plural(len(raids) - BOARD_MAX, 'more raid')} after these."
+    else:
+        text = "No raids planned right now. New raids show up here as soon as they're posted."
+    embed = discord.Embed(title="📅 Upcoming raids", description=text[:4000], colour=discord.Colour.blurple())
+    embed.set_footer(text="Updates by itself. Click a raid's name to go to its post and sign up.")
+    return embed
+
+
+def schedule_board(guild_id: int) -> None:
+    """Redraw the board a few seconds from now (once, however many changes come in meanwhile). Does nothing when
+    the board is off."""
+    if not guild_id or guild_id in _board_soon or not db.setting(guild_id, "board_channel"):
+        return
+
+    async def later():
+        try:
+            await asyncio.sleep(BOARD_DELAY)
+        finally:
+            _board_soon.discard(guild_id)
+        await draw_board(guild_id)
+
+    _board_soon.add(guild_id)
+    task = asyncio.get_running_loop().create_task(later())
+    _board_tasks.add(task)
+    task.add_done_callback(_board_tasks.discard)
+
+
+async def draw_board(guild_id: int) -> bool:
+    """Bring the board up to date. Like refresh_message, a change during a draw makes that draw run once more
+    instead of starting a second one (which could post two boards). False means try again later."""
+    if guild_id in _board_busy:
+        _board_busy[guild_id] = True
+        return True
+    try:
+        while True:
+            _board_busy[guild_id] = False
+            ok = await _draw_board(guild_id)
+            if not _board_busy[guild_id]:
+                return ok
+    finally:
+        _board_busy.pop(guild_id, None)
+
+
+async def _draw_board(guild_id: int) -> bool:
+    channel = bot.get_channel(int_setting(guild_id, "board_channel"))
+    if channel is None:
+        return True  # board off, or its channel was deleted: nothing to draw
+    embed = board_embed(guild_id, channel, int(time.time()))
+    message_id = int_setting(guild_id, "board_message")
+    if message_id:
+        if _board_drawn.get(guild_id) == (message_id, embed.description):
+            return True
+        try:
+            await channel.get_partial_message(message_id).edit(content=None, embed=embed)
+            _board_drawn[guild_id] = (message_id, embed.description)
+            return True
+        except discord.NotFound:
+            pass  # deleted by hand: post a new one below
+        except discord.HTTPException as e:
+            log.warning("Could not edit the raid board in guild %s: %s", guild_id, e)
+            note_error(f"could not update the Upcoming raids board: {e}")
+            return False
+    try:
+        msg = await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+    except discord.HTTPException as e:
+        log.warning("Could not post the raid board in guild %s: %s", guild_id, e)
+        note_error(f"could not post the Upcoming raids board: {e}")
+        return False
+    db.set_setting(guild_id, "board_message", msg.id)
+    _board_drawn[guild_id] = (msg.id, embed.description)
+    await pin_board(msg)
+    return True
+
+
+async def pin_board(msg) -> bool:
+    try:
+        await msg.pin(reason="Upcoming raids board (/config board)")
+        return True
+    except discord.HTTPException:
+        return False
+
+
+async def remove_board(guild_id: int) -> None:
+    """Delete the current board message, if there is one (ignoring one that's already gone)."""
+    channel = bot.get_channel(int_setting(guild_id, "board_channel"))
+    message_id = int_setting(guild_id, "board_message")
+    db.set_setting(guild_id, "board_message", None)
+    _board_drawn.pop(guild_id, None)
+    if channel is not None and message_id:
+        try:
+            await channel.get_partial_message(message_id).delete()
+        except discord.HTTPException:
+            pass
+
+
+async def _run_board(now: int) -> None:
+    for g in db.guilds_with_key("board_channel"):  # raids that started drop off; an unchanged board isn't touched
+        await _attempt("board", g, partial(draw_board, g))
+
+
 async def _run_locks(now: int) -> None:
     for event in db.due_lock(now):  # start time passed: show "This event is closed."
         if await _attempt("lock", event["id"], partial(refresh_message, event["id"])):
@@ -2258,7 +2400,7 @@ async def _run_nudges(now: int) -> None:
 async def reminder_loop():
     now = int(time.time())
     for step in (_run_autoclose, _run_locks, _run_voicecheck, _run_repeats, _run_archive, _run_reminders, _run_nudges,
-                 _run_digest, _run_backuppost, _run_updatecheck):
+                 _run_digest, _run_backuppost, _run_board, _run_updatecheck):
         try:
             await step(now)
         except Exception as e:  # e.g. a database error: log it, and still run the other steps
@@ -2870,6 +3012,8 @@ async def config_show(interaction: discord.Interaction):
     lines.append("**Signup notes:** " + {"off": "off", "officers": "on (officers, in /raid roster)",
                                           "post": "on (also on the raid post)"}[notes_mode(g)])
     lines.append(f"**Spec button on raid posts:** {'on' if spec_switch_on(g) else 'off'}")
+    board_ch = db.setting(g, "board_channel")
+    lines.append(f"**Upcoming raids board:** {f'<#{board_ch}>' if board_ch else 'off'}")
     backup_ch = db.setting(g, "backup_channel")
     lines.append(f"**Daily backup post:** {f'<#{backup_ch}>' if backup_ch else 'off'}")
     nudge = int(db.setting(g, "nudge_hours", 0))
@@ -3174,6 +3318,50 @@ async def config_backupchannel(interaction: discord.Interaction, channel: Option
         f"Every day after {BACKUP_POST_HOUR:02d}:00 (server time) I'll post a copy of this server's data in "
         f"{channel.mention}, starting within a minute; the newest {BACKUP_POSTS_KEPT} are kept. Anyone who can read that "
         "channel can download your members' Discord IDs, so keep it to admins.", ephemeral=True,
+        allowed_mentions=discord.AllowedMentions.none())
+
+
+@config.command(name="board", description="A pinned Upcoming raids message in a channel, kept up to date (off by default)")
+@app_commands.describe(channel="Where the board goes, ideally a quiet channel. Leave empty to turn it off")
+async def config_board(interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None):
+    g = interaction.guild_id
+    if channel is None:
+        await remove_board(g)
+        db.set_setting(g, "board_channel", None)
+        return await interaction.response.send_message("The Upcoming raids board is off and its message is deleted.",
+                                                       ephemeral=True)
+    mine = channel.permissions_for(channel.guild.me)
+    missing = [name for name, ok in (("View Channel", mine.view_channel), ("Send Messages", mine.send_messages),
+                                     ("Embed Links", mine.embed_links)) if not ok]
+    if missing:
+        return await interaction.response.send_message(
+            f"I need {', '.join(missing)} in {channel.mention} to keep the board there. Nothing was changed.",
+            ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+    await remove_board(g)  # moving it, or running this again to bring back a board deleted by hand
+    db.set_setting(g, "board_channel", channel.id)
+    now = int(time.time())
+    embed = board_embed(g, channel, now)
+    try:
+        msg = await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+    except discord.HTTPException:
+        db.set_setting(g, "board_channel", None)
+        return await interaction.response.send_message(
+            f"I couldn't post in {channel.mention}, so the board is still off. Check my permissions there.", ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none())
+    db.set_setting(g, "board_message", msg.id)
+    _board_drawn[g] = (msg.id, embed.description)
+    pinned = await pin_board(msg)
+    notes = []
+    if not pinned:
+        notes.append("I couldn't pin it: give me Manage Messages there, or pin it yourself.")
+    _, hidden = board_raids(g, channel, now)
+    if hidden:
+        notes.append(f"{plural(hidden, 'upcoming raid')} {'is' if hidden == 1 else 'are'} left off because some people "
+                     f"who can read {channel.mention} can't see {'its' if hidden == 1 else 'their'} channel.")
+    await interaction.response.send_message(
+        f"The Upcoming raids board is up in {channel.mention}{' and pinned' if pinned else ''}. It changes by itself when "
+        "raids are posted, edited, cancelled or start, and when people sign up. Raids only appear if everyone who can "
+        "read that channel can see the raid's channel." + "".join(f"\n{n}" for n in notes), ephemeral=True,
         allowed_mentions=discord.AllowedMentions.none())
 
 

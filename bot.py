@@ -281,16 +281,20 @@ async def promote_bench(event_id: int) -> None:
             continue
         db.set_signup(event_id, s["user_id"], s["char_name"], s["wow_class"], s["spec"], s["role"], s["bench_from"])
         text = f"🎉 A {wd.ROLE_SINGULAR[s['role']].lower()} slot opened up. You're off the bench for **{event['title']}**!"
-        try:
-            await (await bot.fetch_user(s["user_id"])).send(text)
-        except discord.HTTPException:  # DMs closed: mention them in the raid channel instead
-            channel = bot.get_channel(event["channel_id"])
-            if channel:
-                try:
-                    await channel.send(f"<@{s['user_id']}> {text}",
-                                       allowed_mentions=USERS_ONLY)
-                except discord.HTTPException:
-                    pass
+        await tell_player(event, s["user_id"], text)
+
+
+async def tell_player(event, user_id: int, text: str) -> None:
+    """A private message to a player; if their DMs are closed, a mention in the raid channel instead. Never raises."""
+    try:
+        await (await bot.fetch_user(user_id)).send(text)
+    except discord.HTTPException:  # DMs closed: mention them in the raid channel instead
+        channel = bot.get_channel(event["channel_id"])
+        if channel:
+            try:
+                await channel.send(f"<@{user_id}> {text}", allowed_mentions=USERS_ONLY)
+            except discord.HTTPException:
+                pass
 
 
 STARTED_AT = time.time()
@@ -1572,6 +1576,48 @@ async def raid_add(interaction: discord.Interaction, event_id: int, member: disc
             text += f" ({bench_reason(event, member.id, row['role'], row['wow_class'])}, so they went on the bench.)"
     await audit(interaction.guild_id, f"➕ {interaction.user.mention} set {member.mention} to {final} for **{event['title']}** (#{event_id})")
     await interaction.response.send_message(text, ephemeral=True, allowed_mentions=quiet)
+    await update_event(event_id)
+
+
+@raid.command(name="promote", description="Move a benched player into the raid, ahead of the line")
+@app_commands.describe(member="The benched player to move in",
+                       over_limit="Move them in even if their role or class is already full (default: no)")
+@app_commands.autocomplete(event_id=event_autocomplete)
+async def raid_promote(interaction: discord.Interaction, event_id: int, member: discord.Member,
+                       over_limit: bool = False):
+    event = await _get_event(interaction, event_id)
+    if not event:
+        return await interaction.response.send_message("Event not found.", ephemeral=True)
+    if time.time() >= event["start_ts"]:
+        return await interaction.response.send_message("That raid has already started.", ephemeral=True)
+    quiet = discord.AllowedMentions.none()
+    row = db.signup(event_id, member.id)
+    if not row or row["status"] != "bench":
+        now = f"is **{row['status']}**" if row else "isn't signed up"
+        return await interaction.response.send_message(
+            f"{member.mention} {now} for **{event['title']}**, so there's nothing to promote. "
+            "`/raid promote` is for players on the bench; `/raid add` changes anyone's status.",
+            ephemeral=True, allowed_mentions=quiet)
+    if not row["role"] or not row["char_name"]:
+        return await interaction.response.send_message(
+            f"{member.mention} is on the bench without a character. Use `/raid add` to sign them up as one.",
+            ephemeral=True, allowed_mentions=quiet)
+    full = ""
+    if apply_cap(event, member.id, row["role"], "in", row["wow_class"])[0] == "bench":  # their role or class is full
+        full = bench_reason(event, member.id, row["role"], row["wow_class"])
+    if full and not over_limit:
+        return await interaction.response.send_message(
+            f"Nothing was changed: {full}. Move someone out first, or run it again with `over_limit: True` "
+            "to take them in anyway.", ephemeral=True, allowed_mentions=quiet)
+    status = row["bench_from"] if row["bench_from"] in ("in", "late") else "in"  # a benched 'late' stays late
+    db.set_signup(event_id, member.id, row["char_name"], row["wow_class"], row["spec"], row["role"], status, None)
+    text = f"Moved {member.mention} off the bench: **{row['char_name']}** is now **{status}** for **{event['title']}**."
+    if full:
+        text += f" ({full[0].upper()}{full[1:]}, so this goes over the limit.)"
+    await audit(interaction.guild_id, f"⬆️ {interaction.user.mention} promoted {member.mention} from the bench for "
+                f"**{event['title']}** (#{event_id}){' over the limit' if full else ''}")
+    await interaction.response.send_message(text, ephemeral=True, allowed_mentions=quiet)
+    await tell_player(event, member.id, f"🎉 An officer moved you off the bench for **{event['title']}**. You're {status}!")
     await update_event(event_id)
 
 
@@ -3153,6 +3199,7 @@ async def help_command(interaction: discord.Interaction):
         "`/raid template save|list|delete` saved setups, then `/raid create template:`\n"
         "`/raid noshow` mark someone who didn't turn up · `/stats team` everyone's attendance · `/stats export` as a spreadsheet\n"
         "`/raid list` upcoming raids with counts · `/raid add` sign someone up or change their status\n"
+        "`/raid promote` move a benched player in, ahead of the line\n"
         "`/raid close` · `/raid cancel` (undo: `/raid restore`) · `/raid remove` · `/raid unsigned`"))
     embed.add_field(name="Admins", inline=False, value=(
         "`/config show` · `/config timezone` · `/config reminder`\n"

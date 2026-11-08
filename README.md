@@ -255,6 +255,10 @@ on any single date. `/always list` shows what you're in, and `/always leave` sto
 - **Reminder** before the raid (default 30 minutes) pinging everyone who's in, late or tentative. It's sent once. If nobody has signed up yet when it's due, it waits for the first signup.
 - **Locking.** When the start time passes the post greys out and signups close.
 - **Recurring raids.** With `repeat` set, the next one is posted when the current one starts.
+- **Automatic no-shows (optional).** With a voice channel set (`/config voicechannel`), 15 minutes after a raid starts the bot looks at who is in that channel. Anyone signed up as **in** who isn't there is marked as a no-show, so officers don't have to do it by hand, and the result is written to the log channel. If **nobody** is in the channel the check is skipped (the raid is probably being run somewhere else), people marked **late** are never checked, and a mistake is one `/raid noshow` (undo) away. It only looks at raids that started in the last 6 hours, so turning it on never rewrites old attendance.
+- **Class limits (optional).** `/raid create classes: Mage 4, Warlock 2` limits how many of a class can be in. Extra people go on the bench and move in when a spot opens, like role limits. The limits show in the post's footer and are kept by templates, copies and repeating raids. `/raid edit classes: off` removes them.
+- **Missing utility warning (optional, `/config buffs`).** Once 8 or more people are in and none of them can provide it, the post says `No Bloodlust yet (Shaman, Mage, Evoker, Hunter)` or `No a battle res yet (...)`. The lists are in `wow_data.py` and are short on purpose; Classic Era has no Bloodlust.
+- **Weekly digest (optional, `/config digest`).** Every Monday after 09:00 (server time) a summary of the last 7 days is posted in the log channel: raids, attended, no-shows, who had the most no-shows.
 - **Daily backup** of your data (the last 7 are kept). Each copy is checked right after it is made, and if the database is ever found damaged when the bot starts, it restores the newest healthy backup by itself and keeps the damaged file.
 
 ### Commands
@@ -267,7 +271,7 @@ on any single date. `/always list` shows what you're in, and `/always leave` sto
 | Everyone | `/always join / leave / list` | Stay signed up to a repeating raid automatically |
 | Everyone | `/stats me` | Your own attendance (last 90 days) |
 | Everyone | `/help` | Command list inside Discord |
-| Officers | `/raid create` | Post a raid (options: title, template, description, tanks, healers, dps, ping, repeat, thread) |
+| Officers | `/raid create` | Post a raid (options: title, template, description, tanks, healers, dps, classes, ping, repeat, thread) |
 | Officers | `/raid list` | Your upcoming raids with sign-up counts, times and links |
 | Officers | `/raid add` | Sign someone up, or change their status or character (works even if sign-ups are closed) |
 | Officers | `/raid edit` | Change title, date, time, description or limits. If the time changes, signed-up people are told |
@@ -281,12 +285,16 @@ on any single date. `/always list` shows what you're in, and `/always leave` sto
 | Officers | `/raid remove` | Remove someone's signup |
 | Officers | `/raid unsigned` | List (or ping) members of a role who haven't answered |
 | Officers | `/stats team` | Everyone's attendance |
+| Officers | `/stats export` | The same as a spreadsheet file (CSV). It has Discord ids, so keep it private |
 | Admins | `/config show` | Show every setting |
 | Admins | `/config timezone / reminder / officer / pingrole` | Server-wide settings |
 | Admins | `/config channel` | Per-channel (or per-category) ping role and raid-leader role |
 | Admins | `/config threads / archive / nudge / logchannel` | Optional extras. All are **off** until you turn them on |
 | Admins | `/config raiderrole` | Only members with this role can sign up (default: anyone) |
 | Admins | `/config autoclose` | Close sign-ups a set number of hours before a raid (default: off) |
+| Admins | `/config voicechannel` | Mark no-shows automatically from a voice channel (default: off). `/config channel voice:` sets one per raid team |
+| Admins | `/config buffs` | Warn on the post when nobody can provide Bloodlust or a battle res (default: off) |
+| Admins | `/config digest` | Post a weekly attendance summary in the log channel (default: off) |
 | Admins | `/config backup` | Sends you a private copy of the database as a file |
 | Admins | `/status` | Health check: version, uptime, channel permissions, last backup, last problem |
 
@@ -296,6 +304,7 @@ on any single date. `/always list` shows what you're in, and `/always leave` sto
 - `/config nudge` pings people in a raid's ping role who haven't answered, a set number of hours before the raid.
 - `/config raiderrole` limits sign-ups to one role. Officers are always allowed, and can sign people up with `/raid add`.
 - `/config autoclose` closes sign-ups that many hours before the start. Reopen a raid any time with `/raid close`.
+- `/config voicechannel`, `/config buffs` and `/config digest` switch on the optional extras described under *What the bot does by itself*.
 - `/config logchannel` posts a one-line note whenever a raid is created, edited, cancelled, closed or someone is marked a no-show.
 
 ### Who can do what

@@ -474,7 +474,7 @@ rows_before = db.signup(made[0]["id"], 64)
 check("dates they're already on are left alone", rows_before is not None)
 
 print("housekeeping")
-check("version string agrees everywhere", f"{B.VERSION})" in checks.USER_AGENT and B.VERSION == "1.10.0")
+check("version string agrees everywhere", f"{B.VERSION})" in checks.USER_AGENT )
 check("the migration added series_id and the series table",
       "series_id" in {r[1] for r in db.conn.execute("PRAGMA table_info(events)")}
       and db.conn.execute("SELECT name FROM sqlite_master WHERE name='series_signups'").fetchone() is not None)

@@ -215,14 +215,6 @@ run(B.audit(G, "hello"))
 check("audit with a deleted log channel is harmless", True)
 db.set_setting(G, "log_channel", 90)
 
-def confirm(i, user=None):
-    """Press the "Yes" button on the private confirmation /raid cancel and /raid remove ask for (since v1.13)."""
-    view = i.response.sent[0][1]["view"]
-    yes = next(c for c in view.children if c.label.startswith("Yes"))
-    click = inter(user or i.user)
-    run(yes.callback(click))
-    return click
-
 
 print("audit hooks on raid actions")
 CH[90].sent.clear()
@@ -233,8 +225,8 @@ CH[11].get_partial_message = MagicMock(side_effect=lambda mid: types.SimpleNames
 run(B.raid_close.callback(inter(admin), ev))
 run(B.raid_edit.callback(inter(admin), ev, title="Hook renamed"))
 db.set_signup(ev, 20, "Hooked", "Mage", "Frost", "dps", "in", None)
-i = inter(admin); run(B.raid_remove.callback(i, ev, member(20))); confirm(i)
-i = inter(admin); run(B.raid_cancel.callback(i, ev)); confirm(i)
+i = inter(admin); run(B.raid_remove.callback(i, ev, member(20)))
+i = inter(admin); run(B.raid_cancel.callback(i, ev))
 lines = [c[0][0] for c in CH[90].sent]
 check("close, edit, remove, cancel each logged", len(lines) == 4 and "closed" in lines[0] and "edited" in lines[1] and "removed" in lines[2] and "cancelled" in lines[3], lines)
 

@@ -4,7 +4,6 @@ Run:  python -I tests/test_setup_wizard.py
 """
 import builtins
 import pathlib
-import shutil
 import sys
 import tempfile
 import time

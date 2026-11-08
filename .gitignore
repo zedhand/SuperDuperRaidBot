@@ -1,6 +1,8 @@
 .env
 *.db
 backups/
+raidbot.log*
+*.db.damaged-*
 __pycache__/
 .venv/
 *.pyc

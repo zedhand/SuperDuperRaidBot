@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.8.7
+A hardening release: no new commands except `/config backup`. Everything below came out of a code audit.
+- **The scheduler can no longer die quietly.** Before, one unexpected error stopped locking, reminders, recurring raids and cleanup until the next restart. Each job now runs on its own, a failure in one raid doesn't affect the others, and the scheduler restarts itself if it ever stops.
+- **Failed jobs are retried instead of lost.** A recurring raid whose next post failed (a permissions problem, a Discord outage) used to never repeat again; the post-closed marker and the reminder were also recorded before they actually worked. They are now recorded only on success, retried once a minute, and given up on after 5 tries with a note in `/status`.
+- **Long titles and descriptions no longer break the post.** Titles are limited to 256 characters and descriptions to 2000, with a clear message instead of "I couldn't post in this channel". A full roster is shortened to stay inside Discord's 6000-character limit, and a @mention is never cut in half.
+- **Daylight saving:** a time that doesn't exist (e.g. 02:30 on the night clocks go forward) or happens twice is now refused with an explanation, instead of silently landing an hour off.
+- **Moving a raid re-arms the "who hasn't answered" ping** (it used to be skipped for the new time).
+- **Database safety:** the database is checked at startup. If it is damaged, the newest healthy daily backup is restored automatically and the damaged file is kept. Daily backups are verified and written atomically. Upgrades add columns only when missing and no longer hide real errors. New `/config backup` sends admins a private copy of the database.
+- **Log file:** errors and warnings go to `raidbot.log` (rotating), not just the window. `/status` shows the last problem. `start.bat` restarts the bot after a crash (but not after a settings problem).
+- **A rush of signups costs fewer edits:** clicks that arrive while the post is being redrawn are folded into one more redraw, so a busy minute no longer hits Discord's edit rate limit.
+- **Security and permissions:** `Update.bat` no longer installs a download it can't verify (it asks you to type INSTALL). Reminders and nudges can't ping `@everyone` or roles even if a raid title contains them. Channel raid leaders can no longer overwrite or delete the server-wide templates. `/config` and `/status` now check for Manage Server themselves, in case a server changed Discord's default.
+- A character can't be added past 25 (the sign-up menu can only show 25).
+- New test suite `tests/test_v187.py` (one group per finding above) and updater tests for the missing-checksum case.
+
 ## 1.8.6
 - **Setup works on Linux and macOS as well as it does on Windows:**
   - Startup messages no longer talk about Notepad and `SETUP.bat` on non-Windows systems; they point to `python setup.py` and "a text editor".

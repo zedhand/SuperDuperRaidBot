@@ -3,7 +3,6 @@
 SETUP.bat deletes this file (and itself) once setup succeeds.
 """
 import subprocess
-import sys
 import time
 import webbrowser
 from datetime import datetime, timezone

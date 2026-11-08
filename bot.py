@@ -1,9 +1,14 @@
 """Single-guild raid signup bot (a small Raid-Helper alternative)."""
+import asyncio
+import io
 import logging
+import logging.handlers
 import os
 import platform
+import tempfile
 import time
 from datetime import datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import Optional, Union
 from zoneinfo import ZoneInfo
@@ -13,7 +18,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
-VERSION = "1.8.6"
+VERSION = "1.8.7"
 WINDOWS = os.name == "nt"  # only used to word messages for the person reading them
 BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / ".env"  # always the .env next to bot.py, whatever folder you launch from
@@ -21,8 +26,8 @@ load_dotenv(ENV_PATH)
 
 import checks  # noqa: E402
 import wow_data as wd  # noqa: E402  # noqa: E402  (after load_dotenv so WOW_VERSION is read)
-from db import DB  # noqa: E402
-from embeds import build_embed  # noqa: E402
+from db import open_database  # noqa: E402
+from embeds import build_embed, text_problem  # noqa: E402
 
 def _env_int(name: str, default: int) -> int:
     raw = (os.getenv(name) or "").strip()
@@ -48,7 +53,17 @@ TZ = _env_tz()
 REMINDER_MINUTES = _env_int("REMINDER_MINUTES", 30)
 
 log = logging.getLogger("raidbot")
-db = DB(os.getenv("DB_PATH", "raidbot.db"))
+db = open_database(os.getenv("DB_PATH", "raidbot.db"))
+LAST_ERROR: tuple[float, str] | None = None  # (time, short text) of the last problem, shown by /status
+
+
+def note_error(text: str) -> None:
+    global LAST_ERROR
+    LAST_ERROR = (time.time(), text[:200])
+
+# Only ping the people we mean to. discord.py's AllowedMentions(users=True) would still let an
+# @everyone or role mention typed into a raid title go through, so everything else is switched off.
+USERS_ONLY = discord.AllowedMentions(everyone=False, roles=False, users=True)
 
 intents = discord.Intents.default()
 intents.members = True  # needed for /raid unsigned; enable "Server Members Intent" in the dev portal
@@ -74,8 +89,16 @@ def guild_tz(guild_id: int) -> ZoneInfo:
         return TZ
 
 
+def int_setting(guild_id: int, key: str, default: int = 0) -> int:
+    """A numeric server setting; a missing or damaged value gives the default instead of an error."""
+    try:
+        return int(db.setting(guild_id, key, default))
+    except (TypeError, ValueError):
+        return default
+
+
 def guild_reminder_minutes(guild_id: int) -> int:
-    return int(db.setting(guild_id, "reminder_minutes", REMINDER_MINUTES))
+    return int_setting(guild_id, "reminder_minutes", REMINDER_MINUTES)
 
 
 def is_officer(interaction: discord.Interaction) -> bool:
@@ -165,7 +188,8 @@ async def promote_bench(event_id: int) -> None:
             channel = bot.get_channel(event["channel_id"])
             if channel:
                 try:
-                    await channel.send(f"<@{s['user_id']}> {text}")
+                    await channel.send(f"<@{s['user_id']}> {text}",
+                                       allowed_mentions=USERS_ONLY)
                 except discord.HTTPException:
                     pass
 
@@ -191,23 +215,53 @@ async def update_event(event_id: int) -> None:
     await refresh_message(event_id)
 
 
-async def refresh_message(event_id: int) -> None:
+_refreshing: dict[int, bool] = {}  # event id -> "changed again while an edit was in flight"
+
+
+async def refresh_message(event_id: int) -> bool:
+    """Redraw the raid post. Returns False only when a redraw failed and is worth retrying.
+
+    Clicks that arrive while an edit is already in flight don't queue one edit each (Discord limits
+    message edits): they flag the post as stale and the edit in flight redraws once more from the
+    latest data, so a rush of signups costs a couple of edits, not one per click."""
+    if event_id in _refreshing:
+        _refreshing[event_id] = True
+        return True
+    ok = True
+    try:
+        while True:
+            _refreshing[event_id] = False
+            ok = await _redraw(event_id)
+            if not _refreshing[event_id]:
+                return ok
+    finally:
+        _refreshing.pop(event_id, None)
+
+
+async def _redraw(event_id: int) -> bool:
     event = db.event(event_id)
     if not event or not event["message_id"]:
-        return
+        return True
     channel = bot.get_channel(event["channel_id"])
     if channel is None:
         try:
             channel = await bot.fetch_channel(event["channel_id"])
+        except discord.NotFound:
+            return True  # the channel is gone for good: nothing to redraw
         except discord.HTTPException:
-            return
+            return False
     locked = is_locked(event)
     embed = build_embed(event, db.signups(event_id), locked)
     try:
         await channel.get_partial_message(event["message_id"]).edit(
             embed=embed, view=ClosedView() if locked else RaidView())
+    except discord.NotFound:
+        return True  # the post was deleted by hand
     except discord.HTTPException as e:
         log.warning("Could not edit event %s message: %s", event_id, e)
+        note_error(f"could not edit the post for raid #{event_id}: {e}")
+        return False
+    return True
 
 
 def char_dict(row) -> dict:
@@ -368,6 +422,7 @@ class RaidView(discord.ui.View):
 
 # ---------------------------------------------------------------- /character
 character = app_commands.Group(name="character", description="Manage your WoW characters")
+MAX_CHARACTERS = 25  # a Discord select menu shows at most 25 options
 
 
 async def class_autocomplete(_: discord.Interaction, current: str):
@@ -400,6 +455,10 @@ async def character_add(interaction: discord.Interaction, name: str, wowclass: s
         return await interaction.response.send_message(
             f"Unknown spec for {cls}. Options: {', '.join(wd.spec_names(cls))}", ephemeral=True)
     name = name.strip()[:32]
+    if not db.character_by_name(interaction.user.id, name) and len(db.characters(interaction.user.id)) >= MAX_CHARACTERS:
+        return await interaction.response.send_message(
+            f"You already have {MAX_CHARACTERS} characters, which is the most the sign-up menu can show. "
+            "Remove one with `/character remove` first.", ephemeral=True)
     db.upsert_character(interaction.user.id, name, cls, sp, wd.role_for(cls, sp), main)
     await interaction.response.send_message(f"Saved **{name}** — {sp} {cls}.", ephemeral=True)
 
@@ -486,13 +545,33 @@ REPEAT_CHOICES = [app_commands.Choice(name="Off", value=0),
                   app_commands.Choice(name="Every 2 weeks", value=14)]
 
 
-def parse_start(guild_id: int, date: str, at: str) -> int | None:
-    """'2026-11-14' + '20:00' in the server's timezone -> unix time, or None if unreadable."""
+def local_to_ts(naive: datetime, tz: ZoneInfo) -> tuple[int | None, str | None]:
+    """A wall-clock time in `tz` -> (unix time, None). Around a daylight-saving change some clock times
+    don't exist (spring) or happen twice (autumn); those give (None, reason) instead of silently
+    landing an hour off."""
+    first, second = naive.replace(tzinfo=tz, fold=0), naive.replace(tzinfo=tz, fold=1)
+    if first.utcoffset() == second.utcoffset():
+        return int(first.timestamp()), None
+    if datetime.fromtimestamp(int(first.timestamp()), tz).replace(tzinfo=None) != naive:
+        return None, (f"{naive:%H:%M} doesn't exist on {naive:%Y-%m-%d}: the clocks in {tz.key} jump forward "
+                      "that night. Pick a different time.")
+    return None, (f"{naive:%H:%M} happens twice on {naive:%Y-%m-%d}: the clocks in {tz.key} go back that "
+                  "night, so I can't tell which one you mean. Pick a different time.")
+
+
+def parse_start_checked(guild_id: int, date: str, at: str) -> tuple[int | None, str]:
+    """'2026-11-14' + '20:00' in the server's timezone -> (unix time, ""), or (None, what to tell the user)."""
     try:
-        start = datetime.strptime(f"{date.strip()} {at.strip()}", "%Y-%m-%d %H:%M").replace(tzinfo=guild_tz(guild_id))
+        naive = datetime.strptime(f"{date.strip()} {at.strip()}", "%Y-%m-%d %H:%M")
     except ValueError:
-        return None
-    return int(start.timestamp())
+        return None, BAD_TIME
+    ts, problem = local_to_ts(naive, guild_tz(guild_id))
+    return ts, problem or ""
+
+
+def parse_start(guild_id: int, date: str, at: str) -> int | None:
+    """Like parse_start_checked but only the time (None when unreadable or ambiguous)."""
+    return parse_start_checked(guild_id, date, at)[0]
 
 
 BAD_TIME = "Couldn't read that date/time. Use `YYYY-MM-DD` and `HH:MM` (24-hour), e.g. `2026-11-14` `20:00`."
@@ -591,11 +670,13 @@ async def raid_create(interaction: discord.Interaction, date: str, at: str, titl
     title = title or (tpl["title"] if tpl else None)
     if not title:
         return await interaction.response.send_message("Give the raid a title, or pick a template.", ephemeral=True)
-    ts = parse_start(interaction.guild_id, date, at)
+    ts, problem = parse_start_checked(interaction.guild_id, date, at)
     if ts is None:
-        return await interaction.response.send_message(BAD_TIME, ephemeral=True)
+        return await interaction.response.send_message(problem, ephemeral=True)
     if ts <= int(time.time()):
         return await interaction.response.send_message("That time is in the past.", ephemeral=True)
+    if problem := text_problem(title, description):
+        return await interaction.response.send_message(problem, ephemeral=True)
 
     def pick(value, key, default=0):
         return value if value is not None else (tpl[key] if tpl else default)
@@ -628,11 +709,13 @@ async def raid_copy(interaction: discord.Interaction, event_id: int, date: str, 
     event = await _get_event(interaction, event_id)
     if not event:
         return await interaction.response.send_message("Event not found.", ephemeral=True)
-    ts = parse_start(interaction.guild_id, date, at)
+    ts, problem = parse_start_checked(interaction.guild_id, date, at)
     if ts is None:
-        return await interaction.response.send_message(BAD_TIME, ephemeral=True)
+        return await interaction.response.send_message(problem, ephemeral=True)
     if ts <= int(time.time()):
         return await interaction.response.send_message("That time is in the past.", ephemeral=True)
+    if problem := text_problem(title, None):
+        return await interaction.response.send_message(problem, ephemeral=True)
     channel = bot.get_channel(event["channel_id"])
     if channel is None:
         return await interaction.response.send_message("The original channel no longer exists.", ephemeral=True)
@@ -670,8 +753,9 @@ async def raid_repeat(interaction: discord.Interaction, event_id: int, every: ap
     await refresh_message(event_id)
 
 
-async def spawn_next(event) -> None:
-    """Post the next occurrence of a recurring raid, keeping the same wall-clock time across DST."""
+async def spawn_next(event) -> bool:
+    """Post the next occurrence of a recurring raid, keeping the same wall-clock time across DST.
+    Returns False if posting failed and should be tried again, True when done (or hopeless)."""
     tz = guild_tz(event["guild_id"])
     now = int(time.time())
     step = timedelta(days=event["repeat_days"])
@@ -682,9 +766,12 @@ async def spawn_next(event) -> None:
     if channel is None:
         try:
             channel = await bot.fetch_channel(event["channel_id"])
-        except discord.HTTPException:
+        except discord.NotFound:
             log.warning("Recurring raid #%s: its channel is gone, not posting the next one", event["id"])
-            return
+            return True
+        except discord.HTTPException as e:
+            log.warning("Recurring raid #%s: couldn't reach its channel (%s), will retry", event["id"], e)
+            return False
     role_id = default_ping_role_id(event["guild_id"], channel)
     try:
         await post_event(channel, channel.guild, event["creator_id"], event["title"], event["description"],
@@ -694,6 +781,9 @@ async def spawn_next(event) -> None:
         log.info("Posted the next occurrence of recurring raid #%s", event["id"])
     except discord.HTTPException as e:
         log.warning("Couldn't post the next occurrence of raid #%s: %s", event["id"], e)
+        note_error(f"couldn't post the next occurrence of raid #{event['id']}: {e}")
+        return False
+    return True
 
 
 # ---- templates: saved raid setups
@@ -710,6 +800,10 @@ async def template_save(interaction: discord.Interaction, name: str, event_id: i
     name = name.strip()[:32]
     if not name:
         return await interaction.response.send_message("Give the template a name.", ephemeral=True)
+    if db.template(interaction.guild_id, name) and not is_officer(interaction):
+        return await interaction.response.send_message(
+            "A template with that name already exists, and templates are shared by the whole server. "
+            "Pick another name, or ask a server-wide officer to replace it.", ephemeral=True)
     db.save_template(interaction.guild_id, name, event["title"], event["description"], event["cap_tank"],
                      event["cap_healer"], event["cap_dps"], event["repeat_days"])
     await interaction.response.send_message(
@@ -734,6 +828,9 @@ async def template_list(interaction: discord.Interaction):
 @template.command(name="delete", description="Delete a saved template")
 @app_commands.autocomplete(name=template_autocomplete)
 async def template_delete(interaction: discord.Interaction, name: str):
+    if not is_officer(interaction):
+        return await interaction.response.send_message(
+            "Templates are shared by the whole server, so only server-wide officers can delete them.", ephemeral=True)
     ok = db.delete_template(interaction.guild_id, name.strip())
     await interaction.response.send_message(
         f"Deleted template **{name}**." if ok else "No template with that name.", ephemeral=True)
@@ -754,6 +851,8 @@ async def raid_edit(interaction: discord.Interaction, event_id: int, title: Opti
     event = await _get_event(interaction, event_id)
     if not event:
         return await interaction.response.send_message("Event not found.", ephemeral=True)
+    if problem := text_problem(title, description):
+        return await interaction.response.send_message(problem, ephemeral=True)
     fields: dict = {}
     if title:
         fields["title"] = title
@@ -767,23 +866,25 @@ async def raid_edit(interaction: discord.Interaction, event_id: int, title: Opti
         tz = guild_tz(interaction.guild_id)
         cur = datetime.fromtimestamp(event["start_ts"], tz)
         try:
-            new = datetime.strptime(f"{date or cur.strftime('%Y-%m-%d')} {at or cur.strftime('%H:%M')}",
-                                    "%Y-%m-%d %H:%M").replace(tzinfo=tz)
+            naive = datetime.strptime(f"{(date or cur.strftime('%Y-%m-%d')).strip()} {(at or cur.strftime('%H:%M')).strip()}",
+                                      "%Y-%m-%d %H:%M")
         except ValueError:
             return await interaction.response.send_message(
                 "Couldn't read that date/time. Use `YYYY-MM-DD` and `HH:MM` (24-hour).", ephemeral=True)
-        ts = int(new.timestamp())
+        ts, problem = local_to_ts(naive, tz)
+        if ts is None:
+            return await interaction.response.send_message(problem, ephemeral=True)
         if ts <= int(time.time()):
             return await interaction.response.send_message("That time is in the past.", ephemeral=True)
         if ts != event["start_ts"]:
-            fields.update(start_ts=ts, reminded=0, lock_shown=0)  # re-arm the reminder and the lock
+            fields.update(start_ts=ts, reminded=0, lock_shown=0, nudged=0)  # re-arm the reminder, the nudge and the lock
             time_changed = True
     if not fields:
         return await interaction.response.send_message("Nothing to change. Fill in at least one option.",
                                                        ephemeral=True)
     db.update_event(event_id, **fields)
     await audit(interaction.guild_id, f"✏️ {interaction.user.mention} edited **{event['title']}** (#{event_id}): "
-                                      + ", ".join(sorted(k for k in fields if k not in ("reminded", "lock_shown"))))
+                                      + ", ".join(sorted(k for k in fields if k not in ("reminded", "lock_shown", "nudged"))))
     await interaction.response.send_message(f"Updated event #{event_id}.", ephemeral=True)
     await update_event(event_id)  # a raised limit may free bench slots
     if time_changed and notify:
@@ -793,7 +894,7 @@ async def raid_edit(interaction: discord.Interaction, event_id: int, title: Opti
             try:
                 await channel.send(f"📅 **{fields.get('title', event['title'])}** moved to <t:{fields['start_ts']}:F> "
                                    f"(<t:{fields['start_ts']}:R>). " + " ".join(f"<@{u}>" for u in users),
-                                   allowed_mentions=discord.AllowedMentions(users=True))
+                                   allowed_mentions=USERS_ONLY)
             except discord.HTTPException:
                 pass
 
@@ -891,44 +992,142 @@ async def nudge_unanswered(event) -> None:
             break
         mentions += m.mention + " "
     try:
-        await channel.send(head + mentions, allowed_mentions=discord.AllowedMentions(users=True))
+        await channel.send(head + mentions, allowed_mentions=USERS_ONLY)
     except discord.HTTPException as e:
         log.warning("Nudge failed for event %s: %s", event["id"], e)
+
+
+MAX_TRIES = 5  # a job that keeps failing is retried once a minute this many times, then given up
+WAIT = "wait"  # a job's way of saying "not due yet": nothing failed, nothing is marked done
+_tries: dict[tuple[str, int], int] = {}
+
+
+async def _attempt(kind: str, event_id: int, work) -> bool:
+    """Run one piece of scheduled work for one raid. `work` returns True when finished, False to try
+    again next minute, or WAIT when it isn't due. An exception counts as False and never escapes, so
+    one bad raid can't stop the others. Returns True once the work is finished or has been given up on
+    (after MAX_TRIES failures), meaning the caller should mark it done."""
+    key = (kind, event_id)
+    try:
+        result = await work()
+    except Exception as e:
+        log.exception("Scheduled %s for raid #%s failed", kind, event_id)
+        note_error(f"{kind} for raid #{event_id}: {e!r}")
+        result = False
+    if result == WAIT:
+        return False
+    if result is not False:
+        _tries.pop(key, None)
+        return True
+    _tries[key] = _tries.get(key, 0) + 1
+    if _tries[key] >= MAX_TRIES:
+        _tries.pop(key, None)
+        log.error("Giving up on %s for raid #%s after %s tries", kind, event_id, MAX_TRIES)
+        note_error(f"gave up on {kind} for raid #{event_id} after {MAX_TRIES} tries")
+        return True
+    return False
+
+
+def mention_list(head: str, user_ids, limit: int = 2000) -> str:
+    """head followed by @mentions, cut between mentions (never through one) to fit one message."""
+    out = head
+    for n, uid in enumerate(user_ids):
+        piece = f"<@{uid}> "
+        if len(out) + len(piece) > limit - 25:
+            return out + f"…and {len(user_ids) - n} more"
+        out += piece
+    return out.rstrip()
+
+
+async def _remind_one(event, now: int):
+    if event["start_ts"] - guild_reminder_minutes(event["guild_id"]) * 60 > now:
+        return WAIT
+    users = [x["user_id"] for x in db.signups(event["id"]) if x["status"] in ("in", "late", "tentative")]
+    if not users:
+        return WAIT  # nobody to remind yet: keep the reminder for when the first person signs up
+    channel = bot.get_channel(event["channel_id"])
+    if channel is None:
+        return True
+    try:
+        await channel.send(mention_list(f"⏰ **{event['title']}** starts <t:{event['start_ts']}:R>! ", users),
+                           allowed_mentions=USERS_ONLY)
+    except discord.HTTPException as e:
+        log.warning("Reminder failed for event %s: %s", event["id"], e)
+        note_error(f"reminder for raid #{event['id']}: {e}")
+        return False
+    return True
+
+
+async def _archive_one(event, now: int):
+    days = int_setting(event["guild_id"], "archive_days")
+    if not days or event["start_ts"] > now - days * 86400:
+        return WAIT
+    await delete_event_post(event)
+    return True
+
+
+async def _nudge_one(event, now: int):
+    hours = int_setting(event["guild_id"], "nudge_hours")
+    if not hours or event["start_ts"] - hours * 3600 > now:
+        return WAIT
+    await nudge_unanswered(event)
+    return True
+
+
+async def _run_locks(now: int) -> None:
+    for event in db.due_lock(now):  # start time passed: show "This event is closed."
+        if await _attempt("lock", event["id"], partial(refresh_message, event["id"])):
+            db.mark_lock_shown(event["id"])
+
+
+async def _run_repeats(now: int) -> None:
+    for event in db.due_repeat(now):  # recurring raid started: post the next one (once)
+        if await _attempt("repeat", event["id"], partial(spawn_next, event)):
+            db.update_event(event["id"], repeated=1)
+
+
+async def _run_archive(now: int) -> None:
+    for event in db.archivable(now - 86400):  # optional cleanup of old posts (/config archive)
+        if await _attempt("cleanup", event["id"], partial(_archive_one, event, now)):
+            db.update_event(event["id"], archived=1)
+
+
+async def _run_reminders(now: int) -> None:
+    for event in db.pending_reminders(now):
+        if await _attempt("reminder", event["id"], partial(_remind_one, event, now)):
+            db.mark_reminded(event["id"])
+
+
+async def _run_nudges(now: int) -> None:
+    for event in db.pending_nudges(now):  # optional "who hasn't answered" ping (/config nudge)
+        if await _attempt("nudge", event["id"], partial(_nudge_one, event, now)):
+            db.update_event(event["id"], nudged=1)
 
 
 @tasks.loop(minutes=1)
 async def reminder_loop():
     now = int(time.time())
-    for event in db.due_lock(now):  # start time passed: show "This event is closed."
-        db.mark_lock_shown(event["id"])
-        await refresh_message(event["id"])
-    for event in db.due_repeat(now):  # recurring raid started: post the next one (once)
-        db.update_event(event["id"], repeated=1)
-        await spawn_next(event)
-    for event in db.archivable(now - 86400):  # optional cleanup of old posts (/config archive)
-        days = int(db.setting(event["guild_id"], "archive_days", 0))
-        if days and event["start_ts"] <= now - days * 86400:
-            db.update_event(event["id"], archived=1)
-            await delete_event_post(event)
-    for event in db.pending_reminders(now):
-        if event["start_ts"] - guild_reminder_minutes(event["guild_id"]) * 60 > now:
-            continue  # not due yet
-        users = [x["user_id"] for x in db.signups(event["id"]) if x["status"] in ("in", "late", "tentative")]
-        if not users:
-            continue  # nobody to remind yet: keep the reminder for when the first person signs up
-        db.mark_reminded(event["id"])
-        channel = bot.get_channel(event["channel_id"])
-        if channel:
-            pings = " ".join(f"<@{u}>" for u in users)
-            try:
-                await channel.send(f"⏰ **{event['title']}** starts <t:{event['start_ts']}:R>! {pings}"[:2000])
-            except discord.HTTPException as e:
-                log.warning("Reminder failed for event %s: %s", event["id"], e)
-    for event in db.pending_nudges(now):  # optional "who hasn't answered" ping (/config nudge)
-        hours = int(db.setting(event["guild_id"], "nudge_hours", 0))
-        if hours and event["start_ts"] - hours * 3600 <= now:
-            db.update_event(event["id"], nudged=1)
-            await nudge_unanswered(event)
+    for step in (_run_locks, _run_repeats, _run_archive, _run_reminders, _run_nudges):
+        try:
+            await step(now)
+        except Exception as e:  # e.g. a database error: log it, and still run the other steps
+            log.exception("Scheduler step %s failed", step.__name__)
+            note_error(f"{step.__name__.removeprefix('_run_')}: {e!r}")
+
+
+def _revive_scheduler() -> None:
+    if not reminder_loop.is_running():
+        log.warning("Restarting the scheduler")
+        reminder_loop.start()
+
+
+@reminder_loop.error
+async def _scheduler_crashed(exc: BaseException):
+    """discord.py stops a loop for good on an unexpected error, which would silently end locking,
+    reminders and recurring raids. Log it and start the loop again."""
+    log.error("The scheduler stopped unexpectedly: %r", exc, exc_info=exc)
+    note_error(f"scheduler stopped: {exc!r}")
+    asyncio.get_running_loop().call_later(5, _revive_scheduler)
 
 
 @tasks.loop(hours=6)
@@ -1027,6 +1226,9 @@ async def myraids(interaction: discord.Interaction):
 @app_commands.default_permissions(manage_guild=True)
 @app_commands.guild_only()
 async def status(interaction: discord.Interaction):
+    if not is_admin(interaction):
+        return await interaction.response.send_message(
+            "Only server admins (Manage Server) can use `/status`.", ephemeral=True)
     up = int(time.time() - STARTED_AT)
     lines = [f"**Raid Bot v{VERSION}** · up {up // 86400}d {up % 86400 // 3600}h {up % 3600 // 60}m · "
              f"ping {f'{round(bot.latency * 1000)} ms' if bot.latency == bot.latency else 'n/a'} · Python {platform.python_version()} · discord.py {discord.__version__}"]
@@ -1050,13 +1252,37 @@ async def status(interaction: discord.Interaction):
     lines.append(f"**Timezone:** {guild_tz(interaction.guild_id).key} · **Reminder:** {guild_reminder_minutes(interaction.guild_id)} min"
                  f" · **Nudge:** {int(db.setting(interaction.guild_id, 'nudge_hours', 0)) or 'off'}"
                  f" · **Log channel:** {'set' if db.setting(interaction.guild_id, 'log_channel') else 'none'}")
+    if LAST_ERROR:
+        lines.append(f"**Last problem:** <t:{int(LAST_ERROR[0])}:R> · {LAST_ERROR[1]} (details in raidbot.log)")
+    else:
+        lines.append("**Last problem:** none since the bot started")
+    if db.recovered_from:
+        lines.append(f"⚠️ The database was damaged when the bot started, so it was restored from `{db.recovered_from}`. "
+                     "Raids created after that backup are missing; the damaged file was kept next to it.")
     await interaction.response.send_message("\n".join(lines), ephemeral=True,
                                             allowed_mentions=discord.AllowedMentions.none())
 
 
 # ---------------------------------------------------------------- /config (admins)
-config = app_commands.Group(name="config", description="Bot settings for this server",
-                            default_permissions=discord.Permissions(manage_guild=True), guild_only=True)
+def is_admin(interaction: discord.Interaction) -> bool:
+    perms = getattr(interaction.user, "guild_permissions", None)
+    return bool(perms and (perms.administrator or getattr(perms, "manage_guild", False)))
+
+
+class AdminGroup(app_commands.Group):
+    """Discord hides these commands from non-admins by default, but a server owner can change that in
+    Integration settings, so the bot checks too."""
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if is_admin(interaction):
+            return True
+        await interaction.response.send_message(
+            "Only server admins (Manage Server) can change the bot's settings.", ephemeral=True)
+        return False
+
+
+config = AdminGroup(name="config", description="Bot settings for this server",
+                    default_permissions=discord.Permissions(manage_guild=True), guild_only=True)
 
 
 @config.command(name="show", description="Show the current settings")
@@ -1167,6 +1393,23 @@ async def config_logchannel(interaction: discord.Interaction, channel: Optional[
         ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
 
+@config.command(name="backup", description="Get a copy of the bot's database (only you see it)")
+async def config_backup(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    with tempfile.TemporaryDirectory() as folder:
+        path = Path(folder) / f"raidbot-{datetime.now():%Y-%m-%d-%H%M}.db"
+        db.snapshot_to(path)
+        size = path.stat().st_size
+        if size > 8 * 1024 * 1024:
+            return await interaction.followup.send(
+                f"The database is {size // 1024 // 1024} MB, too big to attach. Daily copies are in the `backups` "
+                "folder next to the bot.", ephemeral=True)
+        await interaction.followup.send(
+            "Here is a copy of the database (characters, raids, signups, settings). It contains your members' "
+            "Discord IDs, so keep it private. To restore it, stop the bot and replace `raidbot.db` with this file.",
+            file=discord.File(io.BytesIO(path.read_bytes()), filename=path.name), ephemeral=True)
+
+
 @config.command(name="timezone", description="Timezone used when typing raid dates")
 @app_commands.describe(name="e.g. America/New_York or Europe/London")
 async def config_timezone(interaction: discord.Interaction, name: str):
@@ -1226,7 +1469,7 @@ async def help_command(interaction: discord.Interaction):
         "`/config channel` per-channel (or category) ping role and raid leaders\n"
         "`/config threads` discussion thread per raid · `/config archive` delete old posts\n"
         "`/config nudge` ping people who haven't answered · `/config logchannel` activity log\n"
-        "`/status` bot health check"))
+        "`/config backup` get a copy of the database · `/status` bot health check"))
     embed.set_footer(text="Anyone on the bench is moved in automatically when a slot opens.")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -1237,6 +1480,7 @@ async def on_tree_error(interaction: discord.Interaction, error: app_commands.Ap
         return  # the check already told the user
     name = interaction.command.qualified_name if interaction.command else "?"
     log.error("Command /%s failed", name, exc_info=error)
+    note_error(f"/{name}: {error!r}")
     msg = "Something went wrong with that command. The details are in the bot's window; ask your admin to check it."
     try:
         if interaction.response.is_done():
@@ -1371,8 +1615,25 @@ def preflight() -> None:
         print("  Server:   GUILD_ID is blank and the bot is in several servers, so commands may take up to an hour to appear.")
 
 
+def setup_logging() -> None:
+    """Console plus raidbot.log (1 MB x 5 files) next to the bot, so errors survive closing the window."""
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    try:
+        handlers.append(logging.handlers.RotatingFileHandler(
+            BASE_DIR / "raidbot.log", maxBytes=1_000_000, backupCount=5, encoding="utf-8"))
+    except OSError:
+        pass  # read-only folder: console only
+    logging.basicConfig(level=logging.INFO, handlers=handlers,
+                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+
+CRASH_EXIT_CODE = 3  # start.bat restarts the bot on this code, but not on a settings problem
+
+
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+    setup_logging()
+    if db.recovered_from:
+        log.warning("The database was damaged; restored from backups/%s (the damaged file was kept)", db.recovered_from)
     preflight()
     try:
         bot.run(TOKEN, log_handler=None)
@@ -1380,3 +1641,7 @@ if __name__ == "__main__":
         raise SystemExit("Discord rejected the token at login. Reset it in the Developer Portal and paste the new one into .env.")
     except discord.PrivilegedIntentsRequired:
         raise SystemExit("Turn on 'Server Members Intent': Developer Portal -> Bot -> Privileged Gateway Intents -> Save Changes.")
+    except Exception:
+        log.exception("The bot crashed")
+        print("The bot crashed. The details are saved in raidbot.log.")
+        raise SystemExit(CRASH_EXIT_CODE)

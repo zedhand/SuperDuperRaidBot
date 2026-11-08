@@ -52,11 +52,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         base = f"http://127.0.0.1:{state['port']}"
-        if self.path in ("/api", "/bad", "/same"):
+        if self.path in ("/api", "/bad", "/same", "/nodigest"):
             tag = "v1.0" if self.path == "/same" else "v9.9"
             digest = "sha256:" + ("0" * 64 if self.path == "/bad" else GOOD_SHA)
-            body = json.dumps({"tag_name": tag, "assets": [
-                {"name": "Bot-9.9.zip", "browser_download_url": base + "/asset.zip", "digest": digest}]}).encode()
+            asset = {"name": "Bot-9.9.zip", "browser_download_url": base + "/asset.zip", "digest": digest}
+            if self.path == "/nodigest":
+                del asset["digest"]  # GitHub's API sometimes omits it
+            body = json.dumps({"tag_name": tag, "assets": [asset]}).encode()
             self.send_response(200); self.send_header("Content-Type", "application/json")
         elif self.path == "/asset.zip":
             body = NEW_ZIP
@@ -124,6 +126,18 @@ d = fresh_install()
 code, out = run_update(d, "/bad")
 check("refuses on checksum mismatch", code == 1 and "corrupted" in out, out)
 check("nothing changed, no backup made", 'VERSION = "1.0"' in (d / "bot.py").read_text() and not (d / "backups").exists())
+
+print("no checksum from GitHub (must not install unverified code silently)")
+d = fresh_install()
+code, out = run_update(d, "/nodigest")
+check("refuses by default", code == 1 and "can't be verified" in out, out)
+check("  and changes nothing", 'VERSION = "1.0"' in (d / "bot.py").read_text() and not (d / "backups").exists())
+d = fresh_install()
+p = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(d / "update.ps1"),
+                    "-ApiUrl", f"http://127.0.0.1:{state['port']}/nodigest", "-Yes", "-SkipDeps", "-AllowUnverified"],
+                   capture_output=True, text=True, timeout=120)
+check("installs only with -AllowUnverified, with a warning",
+      p.returncode == 0 and "WARNING" in p.stdout and 'VERSION = "9.9"' in (d / "bot.py").read_text(), p.stdout + p.stderr)
 
 print("wrong folder")
 empty = Path(tempfile.mkdtemp())

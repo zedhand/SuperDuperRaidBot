@@ -5,7 +5,8 @@ param(
     [string]$ApiUrl = "https://api.github.com/repos/zedhand/SuperDuperRaidBot/releases/latest",
     [switch]$Yes,       # don't wait for Enter (used by tests)
     [switch]$SkipDeps,  # don't reinstall Python packages (used by tests)
-    [switch]$Force      # reinstall even if already up to date
+    [switch]$Force,     # reinstall even if already up to date
+    [switch]$AllowUnverified  # install even when GitHub gives no checksum to verify the download against
 )
 $ErrorActionPreference = "Stop"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -53,6 +54,16 @@ try {
     Say "Downloading $($asset.name)..."
     Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zip -UseBasicParsing -Headers $headers
 
+    if (-not ($asset.digest -and ([string]$asset.digest) -like "sha256:*")) {
+        # No checksum from GitHub: the download can't be verified, so don't install it silently.
+        if ($AllowUnverified) { Say "WARNING: no checksum available; installing without verifying the download." }
+        elseif (-not $Yes) {
+            Say "GitHub did not give a checksum for this download, so it can't be verified."
+            $answer = Read-Host "Type INSTALL to continue anyway, or just press Enter to cancel"
+            if ($answer -ne "INSTALL") { throw "Cancelled: the download could not be verified. Nothing was changed." }
+        }
+        else { throw "GitHub did not give a checksum for this download, so it can't be verified. Nothing was changed." }
+    }
     if ($asset.digest -and ([string]$asset.digest) -like "sha256:*") {
         $want = ([string]$asset.digest).Substring(7).ToLower()
         # .NET directly: Get-FileHash can be missing when Windows PowerShell is started from PowerShell 7

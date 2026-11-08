@@ -234,7 +234,7 @@ no saved character, the bot asks you to press **Sign Up** first.
 - **Reminder** before the raid (default 30 minutes) pinging everyone who's in, late or tentative. It's sent once. If nobody has signed up yet when it's due, it waits for the first signup.
 - **Locking.** When the start time passes the post greys out and signups close.
 - **Recurring raids.** With `repeat` set, the next one is posted when the current one starts.
-- **Daily backup** of your data (the last 7 are kept).
+- **Daily backup** of your data (the last 7 are kept). Each copy is checked right after it is made, and if the database is ever found damaged when the bot starts, it restores the newest healthy backup by itself and keeps the damaged file.
 
 ### Commands
 
@@ -260,7 +260,8 @@ no saved character, the bot asks you to press **Sign Up** first.
 | Admins | `/config timezone / reminder / officer / pingrole` | Server-wide settings |
 | Admins | `/config channel` | Per-channel (or per-category) ping role and raid-leader role |
 | Admins | `/config threads / archive / nudge / logchannel` | Optional extras. All are **off** until you turn them on |
-| Admins | `/status` | Health check: version, uptime, channel permissions, last backup |
+| Admins | `/config backup` | Sends you a private copy of the database as a file |
+| Admins | `/status` | Health check: version, uptime, channel permissions, last backup, last problem |
 
 **Extras explained**
 - `/config threads` starts a discussion thread under every new raid.
@@ -363,10 +364,12 @@ When the bot can't start it explains the problem and the fix in its window. Read
 | Raid times are an hour off | Check `/config show` for the timezone. Set the right one with `/config timezone` (for example `America/Vancouver`). |
 | No reminder arrived | Reminders go only to people who are signed in, late or tentative, once, before the raid starts, and only while the bot is running. Check `/config reminder`. |
 | `Python is not installed` | `SETUP.bat` installs it. If that fails, install Python from python.org, tick **Add python.exe to PATH**, and run `SETUP.bat` again. |
+| The bot window closed or the bot stopped by itself | Open `raidbot.log` (next to `bot.py`) and read the last lines. `start.bat` restarts the bot automatically after a crash. |
+| "That time doesn't exist" / "happens twice" when creating a raid | Clocks change that night in your timezone (daylight saving). Pick a time before or after the change. |
 | Windows says **"Windows protected your PC"** | Click **More info → Run anyway**. The file is new and unsigned. |
 | The update failed | Close the bot, try `Update.bat` again, or [update by hand](#updating). Your settings and data are never touched. |
 
-Still stuck? [Open an issue](../../issues/new/choose) with the bot version and the last lines from the bot's window
+Still stuck? [Open an issue](../../issues/new/choose) with the bot version and the last lines from the bot's window or `raidbot.log`
 (**remove your token first**).
 
 ---
@@ -401,7 +404,7 @@ save the file, and restart the bot.
 Close the bot, then double-click **`Update.bat`**. It downloads the latest release, checks its checksum, saves your current
 program files into `backups\code-<version>-<time>`, and replaces only the program files. Your settings (`.env`), data
 (`raidbot.db`), backups and icons are never touched, and the database upgrades itself on the next start. Then start the bot
-again with `start.bat`.
+again with `start.bat`. If GitHub doesn't supply a checksum for the download, `Update.bat` can't verify it, so it asks you to type `INSTALL` before going on (press Enter to cancel).
 
 `Update.bat` first appears in v1.8.2. If you're on an older version, update once by hand: unzip the new version into a
 **new folder**, copy your old `raidbot.db` and `.env` into it, and run `start.bat`. After that, `Update.bat` does it for you.
@@ -412,6 +415,8 @@ Everything lives in `raidbot.db` (SQLite) next to the bot: characters, raids and
 `backups/` and keeps the newest 7. To restore, stop the bot, copy a backup over `raidbot.db`, start it again. No data leaves
 your machine except what Discord itself receives (the posts and messages the bot sends). The bot does not read your server's
 chat messages.
+
+Admins can get a copy of the database any time with `/config backup` (it contains your members' Discord IDs, so keep it private). If `raidbot.db` is ever damaged, the bot restores the newest healthy daily backup on the next start, keeps the damaged file as `raidbot.db.damaged-<time>`, and `/status` tells you it happened. If there is no healthy backup it stops and explains, leaving the file untouched. Errors are also written to `raidbot.log` (the newest 5 MB are kept).
 
 ## Class icons
 

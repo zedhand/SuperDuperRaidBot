@@ -35,7 +35,14 @@ echo Checking dependencies...
 ".venv\Scripts\python.exe" -m pip install -q -r requirements.txt
 
 echo Starting the bot. Leave this window open. Close it to stop the bot.
+:run
 ".venv\Scripts\python.exe" bot.py
+if %errorlevel%==3 (
+    echo.
+    echo The bot crashed ^(details are in raidbot.log^). Restarting in 10 seconds... close this window to stop.
+    timeout /t 10 /nobreak >nul
+    goto run
+)
 echo.
 echo The bot stopped. Read any message above for the reason.
 pause

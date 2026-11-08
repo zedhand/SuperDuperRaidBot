@@ -1,6 +1,7 @@
 """Tiny SQLite layer. Synchronous is fine for one guild's traffic."""
+import shutil
 import sqlite3
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 SCHEMA = """
@@ -59,32 +60,62 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 """
 
-# Columns added after v1.0. Older databases get them on startup; the data is kept.
+# Columns added after v1.0: (table, column, definition). Each is added only if it is missing, so a real
+# error (a locked or damaged file) is never mistaken for "already there". Older databases keep their data.
 MIGRATIONS = (
-    "ALTER TABLE events ADD COLUMN lock_shown INTEGER NOT NULL DEFAULT 0",   # v1.2
-    "ALTER TABLE signups ADD COLUMN bench_from TEXT",                        # v1.5: set when auto-benched
-    "ALTER TABLE events ADD COLUMN repeat_days INTEGER NOT NULL DEFAULT 0",  # v1.7: recurring raids
-    "ALTER TABLE events ADD COLUMN repeated INTEGER NOT NULL DEFAULT 0",     # v1.7: next one already posted
-    "ALTER TABLE events ADD COLUMN thread_id INTEGER NOT NULL DEFAULT 0",    # v1.7: discussion thread
-    "ALTER TABLE events ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",     # v1.7: post deleted by cleanup
-    "ALTER TABLE events ADD COLUMN nudged INTEGER NOT NULL DEFAULT 0",       # v1.8: "who hasn't answered" ping sent
-    "ALTER TABLE signups ADD COLUMN no_show INTEGER NOT NULL DEFAULT 0",     # v1.8: signed up but didn't turn up
+    ("events", "lock_shown", "INTEGER NOT NULL DEFAULT 0"),   # v1.2
+    ("signups", "bench_from", "TEXT"),                        # v1.5: set when auto-benched
+    ("events", "repeat_days", "INTEGER NOT NULL DEFAULT 0"),  # v1.7: recurring raids
+    ("events", "repeated", "INTEGER NOT NULL DEFAULT 0"),     # v1.7: next one already posted
+    ("events", "thread_id", "INTEGER NOT NULL DEFAULT 0"),    # v1.7: discussion thread
+    ("events", "archived", "INTEGER NOT NULL DEFAULT 0"),     # v1.7: post deleted by cleanup
+    ("events", "nudged", "INTEGER NOT NULL DEFAULT 0"),       # v1.8: "who hasn't answered" ping sent
+    ("signups", "no_show", "INTEGER NOT NULL DEFAULT 0"),     # v1.8: signed up but didn't turn up
 )
+
+
+class DatabaseCorrupt(Exception):
+    """The database file is damaged (not just busy or read-only)."""
+
+
+def file_is_healthy(path) -> bool:
+    """True if `path` opens as a SQLite database and passes SQLite's own consistency check."""
+    try:
+        con = sqlite3.connect(f"file:{Path(path).as_posix()}?mode=ro", uri=True)
+        try:
+            return con.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return False
 
 
 class DB:
     def __init__(self, path: str = "raidbot.db"):
-        self.conn = sqlite3.connect(path)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA foreign_keys = ON")
-        self.conn.executescript(SCHEMA)
-        for sql in MIGRATIONS:
-            try:
-                self.conn.execute(sql)
-                self.conn.commit()
-            except sqlite3.OperationalError:  # column already exists
-                pass
         self.path = Path(path).resolve()
+        self.recovered_from = None  # set by open_database() when it had to restore a backup
+        self.conn = sqlite3.connect(path)
+        try:
+            self.conn.row_factory = sqlite3.Row
+            self.conn.execute("PRAGMA busy_timeout = 5000")
+            self.conn.execute("PRAGMA foreign_keys = ON")
+            if self.conn.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+                raise DatabaseCorrupt("SQLite's consistency check failed")
+            self.conn.executescript(SCHEMA)
+            for table, column, ddl in MIGRATIONS:
+                if column not in {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}:
+                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+            self.conn.execute(f"PRAGMA user_version = {len(MIGRATIONS)}")
+            self.conn.commit()
+        except sqlite3.OperationalError:  # busy / locked / read-only: not corruption, so say so as it is
+            self.conn.close()
+            raise
+        except sqlite3.DatabaseError as e:  # "file is not a database", "malformed", ...
+            self.conn.close()
+            raise DatabaseCorrupt(str(e)) from e
+        except DatabaseCorrupt:
+            self.conn.close()
+            raise
 
     def _all(self, sql, args=()):
         return self.conn.execute(sql, args).fetchall()
@@ -174,7 +205,8 @@ class DB:
                    "lock_shown", "repeat_days", "repeated", "thread_id", "archived", "nudged"}
         fields = {k: v for k, v in fields.items() if k in allowed}
         if fields:
-            self._run(f"UPDATE events SET {', '.join(k + '=?' for k in fields)} WHERE id=?",
+            # column names are filtered through the allow-list above, values are bound parameters
+            self._run(f"UPDATE events SET {', '.join(k + '=?' for k in fields)} WHERE id=?",  # nosec B608
                       (*fields.values(), event_id))
 
     def pending_nudges(self, now):
@@ -293,17 +325,59 @@ class DB:
     # ---- backups ----
     def backup_daily(self, keep: int = 7):
         """Copy the database to backups/raidbot-YYYY-MM-DD.db (once a day); keep the newest `keep`.
-        Returns the new file's path, or None if today's backup already exists."""
+        The copy is written under a temporary name, checked, and only then renamed, so a crash or a
+        bad copy can never be mistaken for today's backup. Returns the new file's path, or None if
+        today's backup already exists. Raises if the new copy fails its consistency check."""
         folder = self.path.parent / "backups"
         folder.mkdir(exist_ok=True)
         target = folder / f"raidbot-{date.today().isoformat()}.db"
         if target.exists():
             return None
-        dest = sqlite3.connect(target)
+        tmp = folder / (target.name + ".tmp")
+        tmp.unlink(missing_ok=True)
+        dest = sqlite3.connect(tmp)
         try:
             self.conn.backup(dest)  # safe while the bot is running
         finally:
             dest.close()
+        if not file_is_healthy(tmp):
+            tmp.unlink(missing_ok=True)
+            raise RuntimeError("the new backup failed its consistency check, so it was discarded")
+        tmp.replace(target)
         for old in sorted(folder.glob("raidbot-*.db"))[:-keep]:
             old.unlink(missing_ok=True)
         return target
+
+    def snapshot_to(self, dest_path) -> None:
+        """Write a consistent copy of the live database to dest_path (for /config backup)."""
+        dest = sqlite3.connect(dest_path)
+        try:
+            self.conn.backup(dest)
+        finally:
+            dest.close()
+
+
+def open_database(path: str = "raidbot.db") -> DB:
+    """Open the database. If the file is damaged, put it aside and restore the newest healthy daily
+    backup instead of starting with an empty or broken database. Raises SystemExit with a plain-English
+    message when the file is damaged and there is no healthy backup (the file is then left untouched)."""
+    try:
+        return DB(path)
+    except DatabaseCorrupt as e:
+        problem = str(e)
+    target = Path(path).resolve()
+    good = next((b for b in sorted((target.parent / "backups").glob("raidbot-*.db"), reverse=True)
+                 if file_is_healthy(b)), None)
+    if good is None:
+        raise SystemExit(f"The database file {target.name} is damaged ({problem}) and there is no healthy backup "
+                         f"in the 'backups' folder to restore. The file was left untouched. Copy a backup "
+                         f"into place by hand, or move {target.name} away to start fresh.")
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    aside = target.with_name(f"{target.name}.damaged-{stamp}")
+    target.replace(aside)
+    for ext in ("-wal", "-shm", "-journal"):
+        Path(str(target) + ext).unlink(missing_ok=True)
+    shutil.copy2(good, target)
+    database = DB(str(target))
+    database.recovered_from = good.name
+    return database

@@ -2,6 +2,7 @@
 
 SETUP.bat deletes this file (and itself) once setup succeeds.
 """
+import os
 import subprocess
 import time
 import webbrowser
@@ -231,6 +232,19 @@ def pick_version() -> str:
             return "classic_era"
 
 
+def offer_shortcuts():
+    """Two optional conveniences, Windows only, both default to no. Skipped if start.bat isn't here."""
+    if os.name != "nt" or not (BASE / "start.bat").exists():
+        return
+    say()
+    say("Two optional conveniences (press Enter to skip either one):")
+    for kind, question in (("Desktop", "  Put a 'Raid Bot' shortcut on your desktop? [y/N]: "),
+                           ("Startup", "  Start the bot automatically when Windows starts? [y/N]: ")):
+        if ask(question).lower() in ("y", "yes"):
+            say("  " + checks.toggle_shortcut(kind, BASE))
+    say("  You can change these any time by double-clicking Shortcuts.bat.")
+
+
 def main():
     say("=" * 56)
     say("  RAID BOT SETUP  -  about 3 minutes, no typing of codes")
@@ -255,6 +269,7 @@ def main():
 
     write_env({"DISCORD_TOKEN": token, "GUILD_ID": str(guild_id), "TIMEZONE": tz, "WOW_VERSION": version})
     OK_FLAG.write_text("ok", encoding="utf-8")
+    offer_shortcuts()
     say()
     say("All set! Settings saved. This setup file will now delete itself and the bot will start.")
     say("From now on, start the bot with start.bat. Leave its window open.")

@@ -3,12 +3,16 @@
 Uses only the standard library so it works before anything is installed.
 """
 import json
+import os
 import re
+import subprocess
+import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 API = "https://discord.com/api/v10"
-USER_AGENT = "DiscordBot (https://github.com/zedhand/SuperDuperRaidBot, 1.11.0)"  # Discord blocks the default Python UA
+USER_AGENT = "DiscordBot (https://github.com/zedhand/SuperDuperRaidBot, 1.12.0)"  # Discord blocks the default Python UA
 
 # View Channels + Send Messages + Embed Links + Read Message History + Use External Emojis
 # + Create Public Threads + Send Messages in Threads (for the optional per-raid discussion threads)
@@ -79,3 +83,91 @@ def bot_guilds(token: str) -> list[dict]:
 def invite_url(client_id) -> str:
     return (f"https://discord.com/oauth2/authorize?client_id={client_id}"
             f"&permissions={PERMISSIONS}&scope=bot%20applications.commands")
+
+
+# ---------------------------------------------------------------- optional Windows shortcuts
+SHORTCUT_NAME = "Raid Bot.lnk"
+
+
+def special_folder(kind: str) -> Path | None:
+    """The user's Desktop or Startup folder ('Desktop' / 'Startup'). Asks Windows, so a OneDrive-redirected desktop
+    works. RAIDBOT_DESKTOP_DIR / RAIDBOT_STARTUP_DIR override it (used by the tests, never set normally)."""
+    override = os.environ.get(f"RAIDBOT_{kind.upper()}_DIR")
+    if override:
+        return Path(override)
+    if os.name != "nt":
+        return None
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                              f"[Environment]::GetFolderPath('{kind}')"], capture_output=True, text=True, timeout=20).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return Path(out) if out else None
+
+
+def _powershell(script: str, **values: str) -> subprocess.CompletedProcess:
+    """Run a PowerShell snippet. Values travel as environment variables, so nothing is ever pasted into the script."""
+    env = {**os.environ, **{f"RB_{k.upper()}": v for k, v in values.items()}}
+    return subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], env=env,
+                          capture_output=True, text=True, timeout=30)
+
+
+def make_shortcut(link: Path, target: Path, workdir: Path, description: str = "Raid Bot") -> None:
+    """Create a Windows shortcut (.lnk). Raises OSError with a plain reason if it couldn't."""
+    link.parent.mkdir(parents=True, exist_ok=True)
+    result = _powershell("$s = (New-Object -ComObject WScript.Shell).CreateShortcut($env:RB_LINK); "
+                         "$s.TargetPath = $env:RB_TARGET; $s.WorkingDirectory = $env:RB_DIR; "
+                         "$s.Description = $env:RB_DESC; $s.Save()",
+                         link=str(link), target=str(target), dir=str(workdir), desc=description)
+    if result.returncode or not link.exists():
+        raise OSError(result.stderr.strip() or "Windows would not create the shortcut")
+
+
+def read_shortcut(link: Path) -> tuple[str, str]:
+    """(target, working folder) of a shortcut."""
+    result = _powershell("$s = (New-Object -ComObject WScript.Shell).CreateShortcut($env:RB_LINK); "
+                         "Write-Output $s.TargetPath; Write-Output $s.WorkingDirectory", link=str(link))
+    lines = result.stdout.splitlines()
+    return (lines[0].strip() if lines else ""), (lines[1].strip() if len(lines) > 1 else "")
+
+
+def toggle_shortcut(kind: str, base: Path) -> str:
+    """Create the shortcut if it isn't there, remove it if it is. kind is 'Desktop' or 'Startup'. Returns a message."""
+    folder = special_folder(kind)
+    if folder is None:
+        return "Shortcuts are only available on Windows."
+    link = folder / SHORTCUT_NAME
+    what = "the desktop shortcut" if kind == "Desktop" else "starting with Windows"
+    if link.exists():
+        link.unlink()
+        return f"Removed {what}."
+    try:
+        make_shortcut(link, base / "start.bat", base)
+    except OSError as e:
+        return f"Couldn't set up {what}: {e}"
+    return f"Added {what}."
+
+
+def shortcuts_menu(base: Path) -> None:
+    """Shortcuts.bat: switch the desktop shortcut and 'start with Windows' on or off."""
+    if special_folder("Desktop") is None:
+        print("This is for Windows. On other systems see the README ('Keep it running 24/7').")
+        return
+    if not (base / "start.bat").exists():
+        print("I can't find start.bat next to this program.")
+        return
+    while True:
+        on = {k: (special_folder(k) / SHORTCUT_NAME).exists() for k in ("Desktop", "Startup")}
+        print()
+        print("RAID BOT SHORTCUTS")
+        print(f"  1. Shortcut on the desktop ................. {'ON' if on['Desktop'] else 'off'}")
+        print(f"  2. Start the bot when Windows starts ....... {'ON' if on['Startup'] else 'off'}")
+        print("  Type 1 or 2 to switch one, or just press Enter to finish.")
+        choice = input("> ").strip()
+        if choice not in ("1", "2"):
+            return
+        print(toggle_shortcut("Desktop" if choice == "1" else "Startup", base))
+
+
+if __name__ == "__main__" and sys.argv[1:] == ["shortcuts"]:
+    shortcuts_menu(Path(__file__).resolve().parent)

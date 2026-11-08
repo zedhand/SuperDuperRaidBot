@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.12.0
+"Polish". Everything here is optional and off by default; nothing new is required.
+- **`/config setup`: a guided panel.** One private panel with pages for roles, channels, timing and the optional extras. Every control saves as soon as you choose it, shows the current value, and uses the same settings as the `/config` commands. Only the admin who opened it can use it.
+- **New-version notice (`/config updatenotice`).** About once a day the bot asks GitHub for the newest release and posts one line in the log channel, once per version, with a link and the reminder to run `Update.bat`. A failed check is retried in an hour; `/status` shows the latest version. Only a normal request to GitHub is made: nothing about your server.
+- **`/character import` (`/config raiderio`).** Retail only. A player types a character name (and realm) and the bot looks it up on Raider.IO to save the class and spec, and shows the item level. It sends only the name and realm the player typed, and only when an admin has switched it on (with an optional default region and realm). If Raider.IO is down or has no such character, the player is told and can use `/character add`.
+- **Setup extras for Windows.** At the end of `SETUP.bat` you are asked, with the default being no, whether to put a desktop shortcut on your desktop and whether to start the bot when Windows starts. `Shortcuts.bat` switches either on or off any time.
+- Tests: new `tests/test_v112.py`.
+
 ## 1.11.0
 "Accountability".
 - **Automatic no-shows from a voice channel (optional).** `/config voicechannel` (or `/config channel voice:` per raid team) names the channel where your raiders gather. Fifteen minutes after a raid starts (change it with `minutes`), anyone signed up as **in** who isn't in that channel is marked as a no-show, and the result goes to the log channel. Safeguards: if nobody is in the channel the check is skipped; people marked **late**, benched or tentative are never checked; only raids that started in the last 6 hours are looked at, so turning it on never changes old attendance; and `/raid noshow` (undo: True) reverses any mark.

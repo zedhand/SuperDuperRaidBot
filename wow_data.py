@@ -71,6 +71,7 @@ _name = (os.getenv("WOW_VERSION") or "retail").strip().lower()
 if _name not in PRESETS:
     raise SystemExit(f"Unknown WOW_VERSION '{_name}'. Options: {', '.join(PRESETS)}")
 DATA = PRESETS[_name]
+PRESET_NAME = _name  # "retail" or "classic_era"
 UTILITY = UTILITY_BY_PRESET.get(_name, {})
 
 

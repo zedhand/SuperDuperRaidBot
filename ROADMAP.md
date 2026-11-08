@@ -9,12 +9,7 @@ Shipped versions are listed in [CHANGELOG.md](CHANGELOG.md). Ideas below are ope
 
 | Idea | Why | Effort |
 |---|---|---|
-| Remember the last character used and offer it as one click | Faster repeat signups | S |
-| "Add to calendar" (`.ics`) link on the event | People live in their calendar app | M |
-| Opt-in DM reminders per player | Not everyone wants a channel ping | M |
-| Required-buff checker (battle res, bloodlust) with a per-class table | Helps raid leaders spot gaps | M |
 | Warn when the melee/ranged mix is lopsided | Optional composition hints | S |
-| Offer a desktop shortcut / "start with Windows" at the end of setup | Survives reboots | S |
 | Docker image / systemd unit for always-on hosting | 24/7 without a PC | M |
 | More WoW presets (new expansions, Season of Discovery, Cataclysm Classic) | Edit `wow_data.py` | S |
 | Translations of bot messages | Non-English guilds | M |

@@ -2,6 +2,7 @@
 import asyncio
 import csv
 import io
+import json
 import logging
 import logging.handlers
 import os
@@ -9,6 +10,8 @@ import platform
 import re
 import tempfile
 import time
+import urllib.error
+import urllib.request
 from datetime import date as Date
 from datetime import datetime
 from datetime import time as Clock
@@ -16,6 +19,7 @@ from datetime import timedelta, timezone
 from functools import partial
 from pathlib import Path
 from typing import Optional, Union
+from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
 import discord
@@ -23,7 +27,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
-VERSION = "1.11.0"
+VERSION = "1.12.0"
 WINDOWS = os.name == "nt"  # only used to word messages for the person reading them
 BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / ".env"  # always the .env next to bot.py, whatever folder you launch from
@@ -587,6 +591,64 @@ def build_ics(event, url: str, now: int | None = None) -> str:
     return "\r\n".join(_ics_fold(x) for x in lines) + "\r\n"
 
 
+# ---------------------------------------------------------------- the two optional outside lookups
+REPO = "zedhand/SuperDuperRaidBot"
+RELEASES_API = f"https://api.github.com/repos/{REPO}/releases/latest"
+RAIDERIO_API = "https://raider.io/api/v1/characters/profile"
+RAIDERIO_REGIONS = ("us", "eu", "kr", "tw", "cn")
+
+
+def http_get_json(url: str, timeout: float = 8):
+    """GET a URL and parse the JSON. Raises LookupError if the site says 'not found', ConnectionError for anything
+    else that goes wrong (no internet, a timeout, an error page, text that isn't JSON). Blocking: run it in a thread."""
+    if not url.startswith("https://"):
+        raise ConnectionError("only https addresses are used")
+    request = urllib.request.Request(url, headers={"User-Agent": f"SuperDuperRaidBot/{VERSION} (+https://github.com/{REPO})",
+                                                   "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:  # nosec B310 (https only, checked above)
+            return json.loads(response.read(2_000_000).decode("utf-8"))
+    except urllib.error.HTTPError as err:
+        if err.code in (400, 404):
+            raise LookupError("not found") from err
+        raise ConnectionError(f"the site answered HTTP {err.code}") from err
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as err:
+        raise ConnectionError(str(err)) from err
+
+
+def raiderio_url(region: str, realm: str, name: str) -> str:
+    return RAIDERIO_API + "?" + urlencode({"region": region, "realm": realm, "name": name, "fields": "gear"})
+
+
+async def raiderio_lookup(region: str, realm: str, name: str) -> dict:
+    """Class, spec and item level of a retail character, from Raider.IO. Raises LookupError / ConnectionError."""
+    data = await asyncio.to_thread(http_get_json, raiderio_url(region, realm, name))
+    if not isinstance(data, dict) or not data.get("class"):
+        raise ConnectionError("Raider.IO's answer wasn't what I expected")
+    cls = wd.find_class(data.get("class"))
+    gear = data.get("gear") if isinstance(data.get("gear"), dict) else {}
+    ilvl = gear.get("item_level_equipped")
+    link = data.get("profile_url")
+    return {"name": str(data.get("name") or name).strip()[:32], "class": cls,
+            "spec": wd.find_spec(cls, data.get("active_spec_name")),
+            "ilvl": int(ilvl) if isinstance(ilvl, (int, float)) else None,
+            "url": link if isinstance(link, str) and link.startswith("https://raider.io/") else None}
+
+
+def parse_version(text: str | None) -> tuple[int, ...] | None:
+    """'v1.12.0' -> (1, 12, 0, 0). Anything that isn't plain numbers (a beta tag, junk) -> None."""
+    m = re.fullmatch(r"v?(\d+(?:\.\d+){1,3})", (text or "").strip())
+    if not m:
+        return None
+    parts = [int(x) for x in m.group(1).split(".")]
+    return tuple(parts + [0] * (4 - len(parts)))
+
+
+def release_is_newer(tag: str | None) -> bool:
+    new, current = parse_version(tag), parse_version(VERSION)
+    return bool(new and current and new > current)
+
+
 # ---------------------------------------------------------------- /character
 character = app_commands.Group(name="character", description="Manage your WoW characters")
 MAX_CHARACTERS = 25  # a Discord select menu shows at most 25 options
@@ -659,6 +721,57 @@ async def character_remove(interaction: discord.Interaction, name: str):
         return await interaction.response.send_message("Character not found.", ephemeral=True)
     db.delete_character(interaction.user.id, c["id"])
     await interaction.response.send_message(f"Removed **{c['name']}**.", ephemeral=True)
+
+
+@character.command(name="import", description="Look a retail character up on Raider.IO and save it (if your admin turned this on)")
+@app_commands.describe(name="Character name", realm="Realm (default: the server's, see /config raiderio)",
+                       region="us, eu, kr, tw or cn (default: the server's)", main="Make this your main")
+@app_commands.choices(region=[app_commands.Choice(name=r.upper(), value=r) for r in RAIDERIO_REGIONS])
+async def character_import(interaction: discord.Interaction, name: str, realm: Optional[str] = None,
+                           region: Optional[app_commands.Choice[str]] = None, main: bool = False):
+    g = interaction.guild_id
+    if g is None:
+        return await interaction.response.send_message("Use this in your server, not in a private message.", ephemeral=True)
+    if db.setting(g, "raiderio") != "1":
+        return await interaction.response.send_message(
+            "Importing from Raider.IO is switched off on this server. Ask an admin (`/config raiderio`), or save the "
+            "character yourself with `/character add`.", ephemeral=True)
+    if wd.PRESET_NAME != "retail":
+        return await interaction.response.send_message("Raider.IO only covers retail. Use `/character add`.", ephemeral=True)
+    name = name.strip()
+    realm = (realm or db.setting(g, "raiderio_realm") or "").strip()
+    reg = region.value if region else (db.setting(g, "raiderio_region") or "us")
+    if not name or not realm:
+        return await interaction.response.send_message(
+            "I need the character's name and its realm, e.g. `realm: Area 52`. (An admin can set a default realm "
+            "with `/config raiderio`.)", ephemeral=True)
+    if len(name) > 32 or len(realm) > 40:
+        return await interaction.response.send_message("That name or realm is too long.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    try:
+        found = await raiderio_lookup(reg, realm, name)
+    except LookupError:
+        return await interaction.followup.send(
+            f"Raider.IO has no character called **{name}** on **{realm}** ({reg.upper()}). Check the spelling and the "
+            "realm, or save it yourself with `/character add`.", ephemeral=True)
+    except ConnectionError:
+        return await interaction.followup.send(
+            "I couldn't reach Raider.IO just now. Try again in a minute, or use `/character add`.", ephemeral=True)
+    if not found["class"] or not found["spec"]:
+        return await interaction.followup.send(
+            f"Raider.IO found **{found['name']}** but didn't say which spec they play. Save them with "
+            "`/character add` and pick the spec yourself.", ephemeral=True)
+    if not db.character_by_name(interaction.user.id, found["name"]) and len(db.characters(interaction.user.id)) >= MAX_CHARACTERS:
+        return await interaction.followup.send(
+            f"You already have {MAX_CHARACTERS} characters, which is the most the sign-up menu can show. "
+            "Remove one with `/character remove` first.", ephemeral=True)
+    db.upsert_character(interaction.user.id, found["name"], found["class"], found["spec"],
+                        wd.role_for(found["class"], found["spec"]), main)
+    extra = f", item level {found['ilvl']}" if found["ilvl"] else ""
+    link = f" <{found['url']}>" if found["url"] else ""
+    await interaction.followup.send(
+        f"Saved **{found['name']}** — {found['spec']} {found['class']}{extra}.{link}\n"
+        "(To look it up I sent the name and realm you typed to raider.io. Nothing else is shared.)", ephemeral=True)
 
 
 # ---------------------------------------------------------------- /raid (officers)
@@ -1525,6 +1638,52 @@ async def _nudge_one(event, now: int):
     return True
 
 
+_UPDATE = {"next_check": 0.0, "tag": None, "url": None}  # the newest release GitHub told us about, and when to ask again
+
+
+async def latest_release() -> tuple[str, str] | None:
+    """(tag, page address) of the newest GitHub release, or None if it couldn't be found out."""
+    try:
+        data = await asyncio.to_thread(http_get_json, RELEASES_API)
+    except (LookupError, ConnectionError):
+        return None
+    tag, url = data.get("tag_name") if isinstance(data, dict) else None, data.get("html_url") if isinstance(data, dict) else None
+    if not isinstance(tag, str) or not parse_version(tag) or not isinstance(url, str) or not url.startswith("https://github.com/"):
+        return None
+    return tag, url
+
+
+async def _notice_one(guild_id: int, tag: str, url: str):
+    if not release_is_newer(tag) or db.setting(guild_id, "update_announced") == tag:
+        return True
+    log_id = int_setting(guild_id, "log_channel")
+    channel = bot.get_channel(log_id) if log_id else None
+    if channel is None:
+        return True  # nowhere to say it
+    try:
+        await channel.send(f"🆕 **SuperDuperRaidBot {tag}** is available (this bot is v{VERSION}). On Windows, close the bot "
+                           f"and double-click `Update.bat`. What's new: <{url}>", allowed_mentions=discord.AllowedMentions.none())
+    except discord.HTTPException as err:
+        log.warning("Update notice failed for guild %s: %s", guild_id, err)
+        return False
+    db.set_setting(guild_id, "update_announced", tag)
+    return True
+
+
+async def _run_updatecheck(now: int) -> None:
+    """Optional (/config updatenotice): about once a day, ask GitHub for the newest release and say so once per version."""
+    guilds = db.guilds_with_setting("update_notice", "1")
+    if not guilds or now < _UPDATE["next_check"]:
+        return
+    found = await latest_release()
+    _UPDATE["next_check"] = now + (86400 if found else 3600)  # a failed check is retried in an hour
+    if not found:
+        return
+    _UPDATE["tag"], _UPDATE["url"] = found
+    for g in guilds:
+        await _attempt("updatenotice", g, partial(_notice_one, g, found[0], found[1]))
+
+
 async def _autoclose_one(event, now: int):
     hours = int_setting(event["guild_id"], "autoclose_hours")
     if not hours or event["start_ts"] - hours * 3600 > now:
@@ -1673,7 +1832,7 @@ async def _run_nudges(now: int) -> None:
 async def reminder_loop():
     now = int(time.time())
     for step in (_run_autoclose, _run_locks, _run_voicecheck, _run_repeats, _run_archive, _run_reminders, _run_nudges,
-                 _run_digest):
+                 _run_digest, _run_updatecheck):
         try:
             await step(now)
         except Exception as e:  # e.g. a database error: log it, and still run the other steps
@@ -1953,6 +2112,9 @@ async def status(interaction: discord.Interaction):
     lines.append(f"**Timezone:** {guild_tz(interaction.guild_id).key} · **Reminder:** {guild_reminder_minutes(interaction.guild_id)} min"
                  f" · **Nudge:** {int(db.setting(interaction.guild_id, 'nudge_hours', 0)) or 'off'}"
                  f" · **Log channel:** {'set' if db.setting(interaction.guild_id, 'log_channel') else 'none'}")
+    if db.setting(interaction.guild_id, "update_notice") == "1" and _UPDATE["tag"]:
+        newer = release_is_newer(_UPDATE["tag"])
+        lines.append(f"**Latest release:** {_UPDATE['tag']}" + (" (an update is available: close the bot and run `Update.bat`)" if newer else " (you're up to date)"))
     if LAST_ERROR:
         lines.append(f"**Last problem:** <t:{int(LAST_ERROR[0])}:R> · {LAST_ERROR[1]} (details in raidbot.log)")
     else:
@@ -1984,6 +2146,182 @@ class AdminGroup(app_commands.Group):
 
 config = AdminGroup(name="config", description="Bot settings for this server",
                     default_permissions=discord.Permissions(manage_guild=True), guild_only=True)
+
+
+COMMON_ZONES = ["America/Vancouver", "America/Edmonton", "America/Los_Angeles", "America/Denver", "America/Chicago",
+                "America/Toronto", "America/New_York", "America/Halifax", "Europe/London", "Europe/Berlin", "Europe/Paris",
+                "Australia/Sydney", "Pacific/Auckland"]
+REMINDER_STEPS = (10, 15, 30, 45, 60, 90, 120)
+NUDGE_STEPS = (0, 1, 2, 3, 6, 12, 24, 48)
+AUTOCLOSE_STEPS = (0, 1, 2, 3, 6, 12, 24)
+
+
+class SetupView(discord.ui.View):
+    """/config setup: one private panel with a page each for roles, channels, timing and the optional extras.
+    Every control saves straight away, using the same settings as the /config commands."""
+
+    def __init__(self, owner_id: int, guild_id: int):
+        super().__init__(timeout=900)
+        self.owner_id, self.guild_id, self.page = owner_id, guild_id, "home"
+        self.build()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.owner_id:
+            return True
+        await interaction.response.send_message("This panel belongs to the admin who opened it. Run `/config setup` yourself.",
+                                                ephemeral=True)
+        return False
+
+    # ---- what it says
+    def _role(self, key: str) -> str:
+        value = int_setting(self.guild_id, key)
+        return f"<@&{value}>" if value else "none"
+
+    def _chan(self, key: str) -> str:
+        value = int_setting(self.guild_id, key)
+        return f"<#{value}>" if value else "none"
+
+    def _on(self, key: str) -> bool:
+        return db.setting(self.guild_id, key) == "1"
+
+    def text(self) -> str:
+        g = self.guild_id
+        head = {"home": "**Raid Bot setup.** Pick a section. Everything saves as soon as you choose it.",
+                "roles": "**Roles.** Officers manage raids, the ping role is pinged for new raids, and if you set a sign-up role "
+                         "only its members can sign up. Clear a choice to remove it.",
+                "channels": "**Channels.** The log channel gets a line for each raid action. The voice channel is checked for "
+                            "attendance after a raid starts.",
+                "timing": "**Timing.** The server timezone, how long before a raid the reminder goes out, the 'who hasn't answered' "
+                          "nudge, and when sign-ups close.",
+                "extras": "**Optional extras.** Click to switch each one on or off."}[self.page]
+        autoclose = int_setting(g, "autoclose_hours")
+        nudge = int_setting(g, "nudge_hours")
+        body = {
+            "home": [],
+            "roles": [f"Officer role: {self._role('officer_role')}", f"Ping role: {self._role('ping_role')}",
+                      f"Sign-up role: {self._role('raider_role')}"],
+            "channels": [f"Log channel: {self._chan('log_channel')}", f"Voice channel: {self._chan('voice_channel')}"],
+            "timing": [f"Timezone: {guild_tz(g).key}", f"Reminder: {plural(guild_reminder_minutes(g), 'minute')} before",
+                       f"Unanswered nudge: {plural(nudge, 'hour') + ' before' if nudge else 'off'}",
+                       f"Auto-close sign-ups: {plural(autoclose, 'hour') + ' before' if autoclose else 'off'}"],
+            "extras": ["Raider.IO import also needs a default realm: `/config raiderio`."] if wd.PRESET_NAME == "retail" else [],
+        }[self.page]
+        return "\n".join([head] + body)[:2000]
+
+    # ---- the controls of each page
+    def build(self) -> None:
+        self.clear_items()
+        getattr(self, f"_page_{self.page}")()
+
+    def _button(self, label: str, callback, style=discord.ButtonStyle.secondary, row: int | None = None) -> None:
+        button = discord.ui.Button(label=label, style=style, row=row)
+        button.callback = callback
+        self.add_item(button)
+
+    def _goto(self, page: str):
+        async def go(interaction: discord.Interaction):
+            self.page = page
+            self.build()
+            await interaction.response.edit_message(content=self.text(), view=self)
+        return go
+
+    async def _close(self, interaction: discord.Interaction):
+        self.stop()
+        await interaction.response.edit_message(content="Setup saved. You can change any of this later with `/config show` and the `/config` commands.", view=None)
+
+    async def _again(self, interaction: discord.Interaction):
+        self.build()
+        await interaction.response.edit_message(content=self.text(), view=self)
+
+    def _page_home(self) -> None:
+        for label, page in (("Roles", "roles"), ("Channels", "channels"), ("Timing", "timing"), ("Extras", "extras")):
+            self._button(label, self._goto(page))
+        self._button("Done", self._close, discord.ButtonStyle.success)
+
+    def _back(self, row: int) -> None:
+        self._button("Back", self._goto("home"), row=row)
+
+    def _role_select(self, key: str, placeholder: str, row: int) -> None:
+        current = int_setting(self.guild_id, key)
+        select = discord.ui.RoleSelect(placeholder=placeholder, min_values=0, max_values=1, row=row,
+                                       default_values=[discord.Object(id=current)] if current else [])
+
+        async def chosen(interaction: discord.Interaction):
+            picked = select.values
+            value = picked[0] if picked else None
+            if value is not None and value.is_default():
+                value = None  # @everyone means "no restriction"
+            db.set_setting(self.guild_id, key, value.id if value else None)
+            await self._again(interaction)
+        select.callback = chosen
+        self.add_item(select)
+
+    def _page_roles(self) -> None:
+        self._role_select("officer_role", "Officer role", 0)
+        self._role_select("ping_role", "Role to ping for new raids", 1)
+        self._role_select("raider_role", "Sign-up role (only these members can sign up)", 2)
+        self._back(3)
+
+    def _channel_select(self, key: str, placeholder: str, types: list, row: int) -> None:
+        current = int_setting(self.guild_id, key)
+        select = discord.ui.ChannelSelect(placeholder=placeholder, channel_types=types, min_values=0, max_values=1, row=row,
+                                          default_values=[discord.Object(id=current)] if current else [])
+
+        async def chosen(interaction: discord.Interaction):
+            picked = select.values
+            db.set_setting(self.guild_id, key, picked[0].id if picked else None)
+            await self._again(interaction)
+        select.callback = chosen
+        self.add_item(select)
+
+    def _page_channels(self) -> None:
+        self._channel_select("log_channel", "Log channel", [discord.ChannelType.text], 0)
+        self._channel_select("voice_channel", "Voice channel for the attendance check",
+                             [discord.ChannelType.voice, discord.ChannelType.stage_voice], 1)
+        self._back(2)
+
+    def _choice_select(self, key: str, placeholder: str, options: list[tuple[str, str]], current: str, row: int) -> None:
+        select = discord.ui.Select(placeholder=placeholder, row=row, options=[
+            discord.SelectOption(label=label, value=value, default=(value == current)) for label, value in options])
+
+        async def chosen(interaction: discord.Interaction):
+            db.set_setting(self.guild_id, key, select.values[0])
+            await self._again(interaction)
+        select.callback = chosen
+        self.add_item(select)
+
+    def _page_timing(self) -> None:
+        g = self.guild_id
+        zone = guild_tz(g).key
+        zones = COMMON_ZONES if zone in COMMON_ZONES else [zone] + COMMON_ZONES
+        self._choice_select("timezone", "Timezone", [(z, z) for z in zones[:25]], zone, 0)
+        self._choice_select("reminder_minutes", "Reminder before a raid",
+                            [(f"{m} minutes", str(m)) for m in REMINDER_STEPS], str(guild_reminder_minutes(g)), 1)
+        self._choice_select("nudge_hours", "Ping people who haven't answered",
+                            [("Never" if h == 0 else f"{plural(h, 'hour')} before", str(h)) for h in NUDGE_STEPS],
+                            str(int_setting(g, "nudge_hours")), 2)
+        self._choice_select("autoclose_hours", "Close sign-ups before the start",
+                            [("Never" if h == 0 else f"{plural(h, 'hour')} before", str(h)) for h in AUTOCLOSE_STEPS],
+                            str(int_setting(g, "autoclose_hours")), 3)
+        self._back(4)
+
+    def _toggle(self, key: str, label: str) -> None:
+        on = self._on(key)
+
+        async def flip(interaction: discord.Interaction):
+            db.set_setting(self.guild_id, key, "0" if self._on(key) else "1")
+            await self._again(interaction)
+        self._button(f"{label}: {'on' if on else 'off'}", flip,
+                     discord.ButtonStyle.success if on else discord.ButtonStyle.secondary)
+
+    def _page_extras(self) -> None:
+        self._toggle("threads", "Discussion threads")
+        self._toggle("buffs", "Utility warnings")
+        self._toggle("digest", "Weekly digest")
+        self._toggle("update_notice", "Update notice")
+        if wd.PRESET_NAME == "retail":
+            self._toggle("raiderio", "Raider.IO import")
+        self._back(1)
 
 
 @config.command(name="show", description="Show the current settings")
@@ -2171,6 +2509,45 @@ async def config_digest(interaction: discord.Interaction, on: bool):
         "No weekly summary.", ephemeral=True)
 
 
+@config.command(name="raiderio", description="Let players import retail characters from Raider.IO with /character import (off by default)")
+@app_commands.describe(on="True = allow it. It sends the name and realm a player types to raider.io, nothing else",
+                       region="Default region for lookups", realm="Default realm (players can type another)")
+@app_commands.choices(region=[app_commands.Choice(name=r.upper(), value=r) for r in RAIDERIO_REGIONS])
+async def config_raiderio(interaction: discord.Interaction, on: bool, region: Optional[app_commands.Choice[str]] = None,
+                          realm: Optional[str] = None):
+    g = interaction.guild_id
+    if on and wd.PRESET_NAME != "retail":
+        return await interaction.response.send_message(
+            "Raider.IO only covers retail, and this server uses the Classic Era class list, so it stays off.", ephemeral=True)
+    db.set_setting(g, "raiderio", "1" if on else "0")
+    if region is not None:
+        db.set_setting(g, "raiderio_region", region.value)
+    if realm is not None:
+        db.set_setting(g, "raiderio_realm", realm.strip()[:40] or None)
+    shown = (f" Default: {(db.setting(g, 'raiderio_region') or 'us').upper()}"
+             f"{' / ' + db.setting(g, 'raiderio_realm') if db.setting(g, 'raiderio_realm') else ', no default realm yet'}.")
+    await interaction.response.send_message(
+        "Players can now use `/character import`. To look a character up I send the name and realm they type to raider.io "
+        "(nothing else, no accounts)." + shown if on else "`/character import` is off.", ephemeral=True)
+
+
+@config.command(name="updatenotice", description="Say in the log channel when a newer version of the bot is released (off by default)")
+@app_commands.describe(on="True = check GitHub about once a day. It sends no information about your server")
+async def config_updatenotice(interaction: discord.Interaction, on: bool):
+    db.set_setting(interaction.guild_id, "update_notice", "1" if on else "0")
+    await interaction.response.send_message(
+        "About once a day I'll ask GitHub for the newest release and post one line in the log channel when there is a newer "
+        "one. (Needs `/config logchannel`. GitHub only sees a request from this computer.)" if on else
+        "No update notices.", ephemeral=True)
+
+
+@config.command(name="setup", description="A guided panel for the main settings: roles, channels, timing and extras")
+async def config_setup(interaction: discord.Interaction):
+    view = SetupView(interaction.user.id, interaction.guild_id)
+    await interaction.response.send_message(view.text(), view=view, ephemeral=True,
+                                            allowed_mentions=discord.AllowedMentions.none())
+
+
 @config.command(name="logchannel", description="Channel that gets a line for each raid created, edited or cancelled")
 async def config_logchannel(interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None):
     db.set_setting(interaction.guild_id, "log_channel", channel.id if channel else None)
@@ -2242,6 +2619,7 @@ async def help_command(interaction: discord.Interaction):
         "`/character add` save a character (do this once, then sign up in one click)\n"
         "`/character list` · `/character main` · `/character remove`\n"
         "`/remindme` get reminders as a private message · `/always join` stay signed up to a repeating raid\n"
+        "`/character import` look a retail character up on Raider.IO (if your admin turned it on)\n"
         "The **Calendar** button on a raid post gives you a file for your calendar app."))
     embed.add_field(name="Officers", inline=False, value=(
         "`/raid create` post a raid (optionally ping a role)\n"
@@ -2261,6 +2639,7 @@ async def help_command(interaction: discord.Interaction):
         "`/config raiderrole` only that role can sign up · `/config autoclose` close sign-ups before the start\n"
         "`/config voicechannel` automatic no-shows from a voice channel · `/config buffs` warn about missing Bloodlust / battle res\n"
         "`/config digest` weekly attendance summary. Officers can also limit classes: `/raid create classes: Mage 4`\n"
+        "`/config setup` guided panel for the main settings · `/config raiderio` · `/config updatenotice`\n"
         "`/config backup` get a copy of the database · `/status` bot health check"))
     embed.set_footer(text="Anyone on the bench is moved in automatically when a slot opens.")
     await interaction.response.send_message(embed=embed, ephemeral=True)

@@ -1475,8 +1475,9 @@ async def raid_close(interaction: discord.Interaction, event_id: int):
 
 
 class ConfirmView(discord.ui.View):
-    """Private "are you sure?" buttons for a step that deletes something (/config confirm, off by default). Only the
-    officer who ran the command sees them (the reply is ephemeral). No answer within a minute means nothing happens."""
+    """Private "are you sure?" buttons for a step that deletes something (/config confirm turns them on for officers'
+    deletes, off by default; /forgetme always asks). Only the person who ran the command sees them (the reply is
+    ephemeral). No answer within a minute means nothing happens."""
 
     def __init__(self, interaction: discord.Interaction, confirm_label: str, action):
         super().__init__(timeout=60)
@@ -2107,6 +2108,39 @@ async def remindme(interaction: discord.Interaction, on: bool):
         "Done. Before each raid you're signed up for I'll message you privately instead of pinging you in the channel. "
         "(If your private messages from this server are closed I'll ping you in the channel as usual.)" if on else
         "Done. You'll be pinged in the channel before raids, like everyone else.", ephemeral=True)
+
+
+def _forget_summary(counts: dict) -> str:
+    parts = [plural(counts["characters"], "character"), plural(counts["signups"], "raid signup"),
+             plural(counts["series"], "repeating-raid sign-up")]
+    if counts["settings"]:
+        parts.append("your /remindme setting")
+    if counts["cancelled"]:
+        parts.append(f"your place in {plural(counts['cancelled'], 'cancelled raid')}")
+    return ", ".join(parts)
+
+
+@bot.tree.command(name="forgetme", description="Delete your characters and your signup history from the bot (asks first)")
+async def forgetme(interaction: discord.Interaction):
+    counts = db.user_data_counts(interaction.user.id)
+    if not any(counts.values()):
+        return await interaction.response.send_message("The bot has nothing stored about you.", ephemeral=True)
+
+    async def do_forget(click: discord.Interaction, reply):
+        counts, event_ids = db.forget_user(click.user.id)
+        await reply(f"Done. Deleted {_forget_summary(counts)}. The bot no longer has anything stored about you.")
+        for event_id in event_ids:  # take their name off the posts, and move someone off the bench if a slot opened
+            event = db.event(event_id)
+            if event and event["message_id"] and not event["archived"]:
+                await update_event(event_id)
+
+    # Always asks, whatever /config confirm says: the player can't get this back.
+    await interaction.response.send_message(
+        f"Delete everything the bot stores about you, in every server it's in? That's {_forget_summary(counts)}. "
+        "Your attendance history goes with your signups and your name comes off the raid posts. "
+        "This can't be undone. (Raids you created stay. The bot's daily backups still hold the old data "
+        "until they're replaced, within 7 days.)",
+        view=ConfirmView(interaction, "Yes, delete my data", do_forget), ephemeral=True)
 
 
 always = app_commands.Group(name="always", description="Stay signed up to a repeating raid", guild_only=True)
@@ -2754,6 +2788,7 @@ async def help_command(interaction: discord.Interaction):
         "`/character add` save a character (do this once, then sign up in one click)\n"
         "`/character list` · `/character main` · `/character remove`\n"
         "`/remindme` get reminders as a private message · `/always join` stay signed up to a repeating raid\n"
+        "`/forgetme` delete your characters and signup history from the bot\n"
         "`/character import` look a retail character up on Raider.IO (if your admin turned it on)\n"
         "The **Calendar** button on a raid post gives you a file for your calendar app."))
     embed.add_field(name="Officers", inline=False, value=(

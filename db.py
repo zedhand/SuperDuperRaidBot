@@ -314,6 +314,45 @@ class DB:
             self.conn.execute(f"INSERT OR REPLACE INTO cancelled_events({','.join(copy.keys())}) "  # nosec B608
                               f"VALUES({','.join('?' * len(copy.keys()))})", tuple(copy))
 
+    # ---- /forgetme ----
+    USER_SETTING_KEYS = ("dm_remind",)  # per-player settings, stored as "<key>@<user id>"
+
+    def user_data_counts(self, user_id):
+        """What /forgetme would delete: {'characters', 'signups', 'series', 'settings', 'cancelled'} -> count."""
+        uid = int(user_id)
+        cancelled = sum(1 for r in self._all("SELECT signups_json FROM cancelled_events")
+                        if any(int(s.get("user_id", 0)) == uid for s in json.loads(r["signups_json"])))
+        return {
+            "characters": self._one("SELECT COUNT(*) c FROM characters WHERE user_id=?", (uid,))["c"],
+            "signups": self._one("SELECT COUNT(*) c FROM signups WHERE user_id=?", (uid,))["c"],
+            "series": self._one("SELECT COUNT(*) c FROM series_signups WHERE user_id=?", (uid,))["c"],
+            "settings": sum(self._one("SELECT COUNT(*) c FROM settings WHERE key=?", (f"{k}@{uid}",))["c"]
+                            for k in self.USER_SETTING_KEYS),
+            "cancelled": cancelled,
+        }
+
+    def forget_user(self, user_id):
+        """Delete everything stored about one player, in every server: characters, signups (so attendance too),
+        /always sign-ups, their own settings, and their signups inside the copies of cancelled raids.
+        Raids they created stay (they belong to the server). One transaction: all of it goes, or none.
+        Returns (counts, ids of raids they were signed up to) so the caller can redraw those posts."""
+        uid = int(user_id)
+        counts = self.user_data_counts(uid)
+        event_ids = [r["event_id"] for r in self._all("SELECT event_id FROM signups WHERE user_id=?", (uid,))]
+        with self.conn:
+            self.conn.execute("DELETE FROM characters WHERE user_id=?", (uid,))
+            self.conn.execute("DELETE FROM signups WHERE user_id=?", (uid,))
+            self.conn.execute("DELETE FROM series_signups WHERE user_id=?", (uid,))
+            self.conn.executemany("DELETE FROM settings WHERE key=?",
+                                  [(f"{k}@{uid}",) for k in self.USER_SETTING_KEYS])
+            for r in self.conn.execute("SELECT event_id, signups_json FROM cancelled_events").fetchall():
+                signups = json.loads(r["signups_json"])
+                kept = [s for s in signups if int(s.get("user_id", 0)) != uid]
+                if len(kept) != len(signups):
+                    self.conn.execute("UPDATE cancelled_events SET signups_json=? WHERE event_id=?",
+                                      (json.dumps(kept), r["event_id"]))
+        return counts, event_ids
+
     def purge_cancelled(self, now=None):
         """Forget cancelled raids older than KEEP_CANCELLED_DAYS. Returns how many were dropped."""
         now = int(time.time()) if now is None else now

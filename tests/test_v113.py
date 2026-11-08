@@ -1,5 +1,5 @@
 """Offline tests for v1.13/v1.14: the WoW version presets, confirm/undo for /raid cancel and /raid remove, /forgetme,
-the daily backup post and realms on characters (more suites are added below as features land).
+the daily backup post, realms on characters and signup notes (more suites are added below as features land).
 
 Run:  python -I tests/test_v113.py        (or python tests/run_all.py for every suite)
 """
@@ -585,6 +585,176 @@ run(B.forgetme.callback(i))
 press(i, "Yes, delete", user=R1)
 check("/forgetme deletes characters with their realms", db.characters(300) == []
       and db._one("SELECT COUNT(*) c FROM characters WHERE realm='Silvermoon'")["c"] == 0)
+
+# ------------------------------------------------------------ signup notes
+print("signup notes: the database")
+old_path = tmp / "before-notes.db"
+con = sqlite3.connect(old_path)  # a database from before notes existed
+con.executescript(dbmod.SCHEMA)  # SCHEMA has no note column; it comes from MIGRATIONS
+con.execute("INSERT INTO events(id,guild_id,channel_id,title,start_ts,creator_id) VALUES(1,1,11,'Old raid',2000000000,1)")
+con.execute("INSERT INTO signups(event_id,user_id,char_name,wow_class,spec,role,status) VALUES(1,5,'Oldtimer','Warrior','Arms','dps','in')")
+con.commit()
+con.close()
+old = dbmod.DB(str(old_path))
+check("an older database gains the note column and its signups keep working with no note",
+      old.signup(1, 5)["note"] == "" and old.signup(1, 5)["status"] == "in", dict(old.signup(1, 5)))
+old.set_signup(1, 5, "Oldtimer", "Warrior", "Arms", "dps", "late", None)
+check("and can still be changed", old.signup(1, 5)["status"] == "late")
+old.conn.close()
+check("a note is tidied to one plain line, without formatting, mentions or links",
+      dbmod.clean_note("  late   15\nmin ") == "late 15 min" and dbmod.clean_note("**@everyone** <@123>") == "everyone 123"
+      and dbmod.clean_note("`x` ~~y~~ ||z|| [a](b)") == "x y z a(b)" and dbmod.clean_note("see https://evil.example") == "see https evil.example"
+      and dbmod.clean_note("can swap to heals, 100% sure!") == "can swap to heals, 100% sure!"
+      and dbmod.clean_note("Ich komme später 😅") == "Ich komme später 😅"
+      and len(dbmod.clean_note("x" * 200)) == dbmod.NOTE_MAX and dbmod.clean_note(None) == "")
+
+N1, N2, N3 = member(400), member(401), member(402)
+ne = db.create_event(G, 11, "Note raid", "", int(time.time()) + 86400, 1, 0, 0, 1)
+db.set_message_id(ne, 4000)
+db.set_signup(ne, 400, "Notey", "Mage", "Frost", "dps", "in", None)
+db.set_signup(ne, 401, "Benchy", "Rogue", "Subtlety", "dps", "bench", "in")
+db.set_signup(ne, 402, None, None, None, None, "tentative", None)
+
+
+def roster(e):
+    i = inter(officer)
+    run(B.raid_roster.callback(i, e))
+    return text(i)
+
+
+print("/note is off by default")
+check("the setting starts off", B.notes_mode(G) == "off" and db.setting(G, "signup_notes") is None)
+i = inter(N1)
+run(B.note.callback(i, ne, "late 15 min"))
+check("/note says notes are off and stores nothing", "/config notes" in text(i) and db.signup(ne, 400)["note"] == ""
+      and i.response.sent[0][1].get("ephemeral") is True, text(i))
+check("the roster has no notes section", "Notes" not in roster(ne))
+i = inter(officer)
+run(B.config_show.callback(i))
+check("/config show says off", "Signup notes:** off" in text(i), text(i))
+
+print("/config notes on (officers only)")
+i = inter(officer)
+run(B.config_notes.callback(i, True))
+check("turned on, notes for officers only", B.notes_mode(G) == "officers" and "/raid roster" in text(i)
+      and "onpost: True" in text(i), text(i))
+CH[11].edits.clear()
+i = inter(N1)
+run(B.note.callback(i, ne, "  late 15 min "))
+check("/note saves a note on your signup", db.signup(ne, 400)["note"] == "late 15 min"
+      and "*late 15 min*" in text(i) and "to the raid officers" in text(i), text(i))
+check("the post isn't redrawn when it doesn't show notes", not any(mid == 4000 for mid, _ in CH[11].edits))
+check("the raid post doesn't show it", "late 15 min" not in post_text(ne))
+r = roster(ne)
+check("/raid roster lists it with the character and status", "Notes (1):" in r and "Notey (in): late 15 min" in r, r)
+i = inter(N3)
+run(B.note.callback(i, ne, "might be on call"))
+check("someone signed up without a character can add a note too (shown by name, or id if they left the server)",
+      "user 402 (tentative): might be on call" in roster(ne), roster(ne))
+db.set_signup(ne, 400, "Notey", "Mage", "Frost", "dps", "late", None)
+check("the note stays when the player changes their status", db.signup(ne, 400)["note"] == "late 15 min")
+db.set_signup(ne, 402, None, None, None, None, "absent", None)
+check("an absent player's note isn't in the roster", "might be on call" not in roster(ne) and db.signup(ne, 402)["note"])
+db.set_signup(ne, 400, "Notey", "Mage", "Frost", "dps", "in", None)
+i = inter(N1)
+run(B.myraids.callback(i))
+check("/myraids shows your note", "*late 15 min*" in text(i), text(i))
+choices = run(B.my_signup_autocomplete(inter(N1), "note"))
+check("the raid menu lists raids you signed up for", [c.value for c in choices] == [ne], choices)
+
+i = inter(member(499))
+run(B.note.callback(i, ne, "hello"))
+check("someone who isn't signed up is told to sign up first", "aren't signed up" in text(i) and db.signup(ne, 499) is None, text(i))
+i = inter(N1)
+run(B.note.callback(i, 99999, "hello"))
+check("an unknown raid is refused", "Raid not found" in text(i))
+theirs_note = db.create_event(2, 99, "Elsewhere", "", int(time.time()) + 86400, 1, 0, 0, 0)
+db.set_signup(theirs_note, 400, "Notey", "Mage", "Frost", "dps", "in", None)
+i = inter(N1)
+run(B.note.callback(i, theirs_note, "hello"))
+check("a raid on another server is refused", "Raid not found" in text(i) and db.signup(theirs_note, 400)["note"] == "")
+i = inter(N1)
+run(B.note.callback(i, ne, "<@> ** ``"))
+check("a note that is only formatting is refused", "plain words" in text(i) and db.signup(ne, 400)["note"] == "late 15 min", text(i))
+i = inter(N1)
+run(B.note.callback(i, ne, "y" * 80))
+check("a long note is cut and the player is told", db.signup(ne, 400)["note"] == "y" * dbmod.NOTE_MAX and "cut to 60" in text(i), text(i))
+past = db.create_event(G, 11, "Last week", "", int(time.time()) - 7 * 86400, 1, 0, 0, 0)
+db.set_signup(past, 400, "Notey", "Mage", "Frost", "dps", "in", None)
+i = inter(N1)
+run(B.note.callback(i, past, "sorry"))
+check("a raid that's over can't get a note", "is over" in text(i) and db.signup(past, 400)["note"] == "", text(i))
+i = inter(N1)
+run(B.note.callback(i, ne, None))
+check("/note without text clears it", db.signup(ne, 400)["note"] == "" and "Cleared" in text(i), text(i))
+
+print("/config notes onpost: True")
+i = inter(officer)
+run(B.config_notes.callback(i, True, True))
+check("notes also on the post", B.notes_mode(G) == "post" and "raid post" in text(i), text(i))
+CH[11].edits.clear()
+i = inter(N1)
+run(B.note.callback(i, ne, "late 15 min"))
+check("the reply says everyone sees it", "on the raid post" in text(i), text(i))
+check("the post is redrawn straight away", any(mid == 4000 for mid, _ in CH[11].edits), CH[11].edits)
+i = inter(N2)
+run(B.note.callback(i, ne, "can swap to heals"))
+check("the post shows notes in italics after the name, in the role columns and on the bench line",
+      "**Notey** · *late 15 min*" in post_text(ne) and "**Benchy** (#1 dps) · *can swap to heals*" in post_text(ne), post_text(ne))
+db.set_setting(G, "show_realms", "1")
+db.upsert_character(400, "Notey", "Mage", "Frost", "dps", True, "Draenor")
+check("with realms on too, the note comes after the realm", "**Notey** (Draenor) · *late 15 min*" in post_text(ne), post_text(ne))
+db.set_setting(G, "show_realms", "0")
+check("without a note a name shows as before", "**Notey**" in post_text(ne)
+      and B.render_embed(db.event(ne), db.signups(ne), False).fields)
+for n in range(30):  # a full raid where everyone left a long note still fits in one post
+    db.set_signup(ne, 1000 + n, f"Player{n}", "Warrior", "Arms", "dps", "in", None)
+    db.set_note(ne, 1000 + n, "z" * dbmod.NOTE_MAX)
+emb = B.render_embed(db.event(ne), db.signups(ne), False)
+check("a full post with long notes stays inside Discord's limits", len(emb) <= 6000 and all(len(f.value) <= 1024 for f in emb.fields), len(emb))
+check("and so does the roster", len(roster(ne)) <= 2000, len(roster(ne)))
+for n in range(30):
+    db.remove_signup(ne, 1000 + n)
+i = inter(officer)
+run(B.config_show.callback(i))
+check("/config show says where notes show", "Signup notes:** on (also on the raid post)" in text(i), text(i))
+
+i = inter(officer)
+run(B.config_notes.callback(i, False))
+check("/config notes off hides notes everywhere and keeps them", B.notes_mode(G) == "off" and "late 15 min" not in post_text(ne)
+      and "Notes" not in roster(ne) and db.signup(ne, 400)["note"] == "late 15 min" and "kept" in text(i), text(i))
+i = inter(N1)
+run(B.myraids.callback(i))
+check("and /myraids doesn't show them", "late 15 min" not in text(i), text(i))
+i = inter(officer)
+run(B.config_notes.callback(i, True))
+check("turning notes back on with onpost left out is officers only again", B.notes_mode(G) == "officers")
+
+print("notes and cancel / restore, the daily backup copy and /forgetme")
+eid = new_raid("Noted cancel")
+db.set_note(eid, 50, "bringing feasts")
+db.cancel_event(eid, 1)
+db.restore_event(eid)
+check("a cancelled and restored raid keeps its notes", db.signup(eid, 50)["note"] == "bringing feasts")
+db.set_note(theirs_note, 400, "Secretnote")
+out = tmp / "note-copy.db"
+db.snapshot_for_guild(str(out), G)
+con = sqlite3.connect(out)
+check("this server's copy keeps its notes", con.execute(f"SELECT note FROM signups WHERE event_id={ne} AND user_id=400").fetchone() == ("late 15 min",))
+con.close()
+check("and has no other server's note in the file", b"Secretnote" not in out.read_bytes())
+fc = new_raid("Noted and cancelled")
+db.set_signup(fc, 400, "Notey", "Mage", "Frost", "dps", "in", None)
+db.set_note(fc, 400, "Cancellednote")
+db.cancel_event(fc, 1)
+i = inter(N1)
+run(B.forgetme.callback(i))
+press(i, "Yes, delete", user=N1)
+check("/forgetme deletes a player's notes in every server, and in cancelled raids' copies",
+      db.signup(ne, 400) is None and db.signup(theirs_note, 400) is None
+      and db._one("SELECT COUNT(*) c FROM signups WHERE note IN ('late 15 min','Secretnote')")["c"] == 0
+      and "Cancellednote" not in db.cancelled_event(fc)["signups_json"])
+check("other players' notes stay", db.signup(ne, 401)["note"] == "can swap to heals")
 
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

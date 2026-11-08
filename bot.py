@@ -35,7 +35,7 @@ load_dotenv(ENV_PATH)
 
 import checks  # noqa: E402
 import wow_data as wd  # noqa: E402  # noqa: E402  (after load_dotenv so WOW_VERSION is read)
-from db import KEEP_CANCELLED_DAYS, caps_dict, caps_text, clean_realm, open_database  # noqa: E402
+from db import KEEP_CANCELLED_DAYS, NOTE_MAX, caps_dict, caps_text, clean_note, clean_realm, open_database  # noqa: E402
 from embeds import build_embed, text_problem  # noqa: E402
 
 def _env_int(name: str, default: int) -> int:
@@ -176,12 +176,20 @@ def may_sign_up(interaction: discord.Interaction) -> bool:
     return any(r.id == role_id for r in getattr(interaction.user, "roles", []))
 
 
+def notes_mode(guild_id: int) -> str:
+    """/config notes: 'off' (the default), 'officers' (notes only in /raid roster) or 'post' (also on the raid post)."""
+    if db.setting(guild_id, "signup_notes") != "1":
+        return "off"
+    return "post" if db.setting(guild_id, "notes_on_post") == "1" else "officers"
+
+
 def render_embed(event, signups, locked: bool):
-    """The raid post, with the optional missing-utility warnings if /config buffs is on, and realms after the
-    character names if /config realms is on."""
+    """The raid post, with the optional missing-utility warnings if /config buffs is on, realms after the
+    character names if /config realms is on, and players' notes if /config notes shows them on the post."""
     g = event["guild_id"]
     realms = db.realms_for(signups) if db.setting(g, "show_realms") == "1" else None
-    return build_embed(event, signups, locked, buffs=db.setting(g, "buffs") == "1", realms=realms)
+    notes = ({s["user_id"]: s["note"] for s in signups if s["note"]} if notes_mode(g) == "post" else None)
+    return build_embed(event, signups, locked, buffs=db.setting(g, "buffs") == "1", realms=realms, notes=notes)
 
 
 def autoclose_inside(guild_id: int, start_ts: int) -> bool:
@@ -1496,7 +1504,23 @@ async def raid_roster(interaction: discord.Interaction, event_id: int):
     bench = [x["char_name"] for x in signups if x["status"] == "bench" and x["char_name"]]
     if bench:
         lines.append(f"Bench ({len(bench)}): {', '.join(bench)}")
-    await interaction.response.send_message("```\n" + "\n".join(lines) + "\n```", ephemeral=True)
+    noted = [x for x in signups if x["note"] and x["status"] != "absent"] if notes_mode(event["guild_id"]) != "off" else []
+    if noted:  # /config notes: the players' own notes, e.g. "late 15 min"
+        lines.append("")
+        lines.append(f"Notes ({len(noted)}):")
+        member = getattr(interaction.guild, "get_member", lambda _: None)
+        for x in noted:
+            who = x["char_name"] or getattr(member(x["user_id"]), "display_name", None) or f"user {x['user_id']}"
+            lines.append(f"  {who} ({x['status']}): {x['note']}")
+    await interaction.response.send_message(_clip_block(lines), ephemeral=True)
+
+
+def _clip_block(lines: list[str]) -> str:
+    """The roster as one code block, cut to fit in a Discord message (2000 characters)."""
+    body = "\n".join(lines)
+    if len(body) > 1980:
+        body = body[:1970].rsplit("\n", 1)[0] + "\n…"
+    return "```\n" + body + "\n```"
 
 
 @raid.command(name="close", description="Close or reopen signups for an event")
@@ -2206,9 +2230,60 @@ async def myraids(interaction: discord.Interaction):
     label = {"in": "✅ in", "late": "⏰ late", "tentative": "❔ tentative", "bench": "🪑 bench", "absent": "❌ absent"}
     lines = [f"{label.get(r['my_status'], r['my_status'])} · <t:{r['start_ts']}:f> · "
              f"[{r['title']}](https://discord.com/channels/{r['guild_id']}/{r['channel_id']}/{r['message_id']})"
+             + (f" · *{r['my_note']}*" if r["my_note"] and notes_mode(interaction.guild_id) != "off" else "")
              for r in rows[:15]]
     await interaction.response.send_message("\n".join(lines), ephemeral=True,
                                             allowed_mentions=discord.AllowedMentions.none())
+
+
+async def my_signup_autocomplete(interaction: discord.Interaction, current: str):
+    """Upcoming raids this player has answered, as 'Title · Nov 14 20:00 (#id)'."""
+    tz = guild_tz(interaction.guild_id)
+    out = []
+    for e in db.user_upcoming(interaction.guild_id, interaction.user.id, int(time.time()) - NOTE_GRACE):
+        label = f"{e['title']} · {datetime.fromtimestamp(e['start_ts'], tz).strftime('%b %d %H:%M')} (#{e['id']})"
+        if current.lower() in label.lower():
+            out.append(app_commands.Choice(name=label[:100], value=e["id"]))
+    return out[:25]
+
+
+NOTE_GRACE = 6 * 3600  # a note can still be changed this long after the raid started
+
+
+@bot.tree.command(name="note", description="Add a short note to your signup, e.g. 'late 15 min' (leave it out to clear it)")
+@app_commands.describe(raid="A raid you've signed up for",
+                       text=f"Up to {NOTE_MAX} characters, e.g. late 15 min. Leave it out to clear your note")
+@app_commands.autocomplete(raid=my_signup_autocomplete)
+@app_commands.guild_only()
+async def note(interaction: discord.Interaction, raid: int, text: Optional[str] = None):
+    g, uid = interaction.guild_id, interaction.user.id
+    mode = notes_mode(g)
+    if mode == "off":
+        return await interaction.response.send_message(
+            "Signup notes are off on this server. An admin can turn them on with `/config notes`.", ephemeral=True)
+    event = db.event(raid)
+    if not event or event["guild_id"] != g:
+        return await interaction.response.send_message("Raid not found. Pick one from the list.", ephemeral=True)
+    if not db.signup(raid, uid):
+        return await interaction.response.send_message(
+            f"You aren't signed up for **{event['title']}**. Sign up on the post first, then add a note.", ephemeral=True)
+    if event["archived"] or event["start_ts"] < time.time() - NOTE_GRACE:
+        return await interaction.response.send_message(f"**{event['title']}** is over, so its notes can't change.",
+                                                       ephemeral=True)
+    new = clean_note(text)
+    if text and text.strip() and not new:
+        return await interaction.response.send_message(
+            "That note is empty once formatting, mentions and links are taken out. Try plain words, e.g. `late 15 min`.",
+            ephemeral=True)
+    db.set_note(raid, uid, new)
+    seen = "on the raid post" if mode == "post" else "to the raid officers"
+    cut = f" (cut to {NOTE_MAX} characters)" if text and len(" ".join(text.split())) > NOTE_MAX else ""
+    await interaction.response.send_message(
+        f"Your note on **{event['title']}**: *{new}*{cut}. It's shown {seen}, and stays if you change your status."
+        if new else f"Cleared your note on **{event['title']}**.", ephemeral=True,
+        allowed_mentions=discord.AllowedMentions.none())
+    if mode == "post" and event["message_id"]:
+        await refresh_message(raid)
 
 
 @bot.tree.command(name="remindme", description="Get raid reminders as a private message instead of a ping in the channel")
@@ -2590,6 +2665,7 @@ class SetupView(discord.ui.View):
         self._toggle("update_notice", "Update notice")
         self._toggle("confirm_deletes", "Confirm deletes")
         self._toggle("show_realms", "Realms on posts")
+        self._toggle("signup_notes", "Signup notes")
         if wd.PRESET_NAME == "retail":
             self._toggle("raiderio", "Raider.IO import")
         self._back(1)
@@ -2618,6 +2694,8 @@ async def config_show(interaction: discord.Interaction):
     lines.append(f"**Weekly attendance digest:** {'on' if db.setting(g, 'digest') == '1' else 'off'}")
     lines.append(f"**Ask before cancel / remove:** {'on' if db.setting(g, 'confirm_deletes') == '1' else 'off'}")
     lines.append(f"**Realms on raid posts:** {'on' if db.setting(g, 'show_realms') == '1' else 'off'}")
+    lines.append("**Signup notes:** " + {"off": "off", "officers": "on (officers, in /raid roster)",
+                                          "post": "on (also on the raid post)"}[notes_mode(g)])
     backup_ch = db.setting(g, "backup_channel")
     lines.append(f"**Daily backup post:** {f'<#{backup_ch}>' if backup_ch else 'off'}")
     nudge = int(db.setting(g, "nudge_hours", 0))
@@ -2828,6 +2906,27 @@ async def config_realms(interaction: discord.Interaction, on: bool):
         if on else "Raid posts show character names only. Players' saved realms are kept.", ephemeral=True)
 
 
+@config.command(name="notes", description="Let players add a short note to their signup with /note (off by default)")
+@app_commands.describe(on="True = players can use /note, e.g. 'late 15 min'. Officers see notes in /raid roster",
+                       onpost="True = also show the notes on the raid post, for everyone (default: officers only)")
+async def config_notes(interaction: discord.Interaction, on: bool, onpost: bool = False):
+    g = interaction.guild_id
+    db.set_setting(g, "signup_notes", "1" if on else "0")
+    db.set_setting(g, "notes_on_post", "1" if on and onpost else "0")
+    for upcoming in db.upcoming_events(g, int(time.time()))[:25]:  # redraw the open posts now
+        if upcoming["message_id"]:
+            await refresh_message(upcoming["id"])
+    if not on:
+        text = "Signup notes are off: `/note` is turned off and notes are hidden. Notes already written are kept."
+    elif onpost:
+        text = (f"Players can add a note of up to {NOTE_MAX} characters to their signup with `/note`. "
+                "It shows on the raid post after their name, and in `/raid roster`.")
+    else:
+        text = (f"Players can add a note of up to {NOTE_MAX} characters to their signup with `/note`. "
+                "Officers see the notes in `/raid roster`; the raid post doesn't show them (`onpost: True` would).")
+    await interaction.response.send_message(text, ephemeral=True)
+
+
 @config.command(name="updatenotice", description="Say in the log channel when a newer version of the bot is released (off by default)")
 @app_commands.describe(on="True = check GitHub about once a day. It sends no information about your server")
 async def config_updatenotice(interaction: discord.Interaction, on: bool):
@@ -2938,6 +3037,7 @@ async def help_command(interaction: discord.Interaction):
         "`/character add` save a character (do this once, then sign up in one click)\n"
         "`/character list` · `/character main` · `/character realm` · `/character remove`\n"
         "`/remindme` get reminders as a private message · `/always join` stay signed up to a repeating raid\n"
+        "`/note` add a short note to your signup, e.g. late 15 min (if your admin turned it on)\n"
         "`/forgetme` delete your characters and signup history from the bot\n"
         "`/character import` look a retail character up on Raider.IO (if your admin turned it on)\n"
         "The **Calendar** button on a raid post gives you a file for your calendar app."))
@@ -2959,7 +3059,7 @@ async def help_command(interaction: discord.Interaction):
         "`/config raiderrole` only that role can sign up · `/config autoclose` close sign-ups before the start\n"
         "`/config voicechannel` automatic no-shows from a voice channel · `/config buffs` warn about missing Bloodlust / battle res\n"
         "`/config digest` weekly attendance summary. Officers can also limit classes: `/raid create classes: Mage 4`\n"
-        "`/config setup` guided panel for the main settings · `/config raiderio` · `/config updatenotice` · `/config confirm` · `/config realms`\n"
+        "`/config setup` guided panel for the main settings · `/config raiderio` · `/config updatenotice` · `/config confirm` · `/config realms` · `/config notes`\n"
         "`/config backup` get a copy of the database · `/status` bot health check"))
     embed.set_footer(text="Anyone on the bench is moved in automatically when a slot opens.")
     await interaction.response.send_message(embed=embed, ephemeral=True)

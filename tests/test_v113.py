@@ -160,7 +160,28 @@ def new_raid(title="Karazhan"):
     return eid
 
 
-print("/raid cancel asks first")
+print("/config confirm is off by default: cancel and remove act straight away")
+check("the setting starts off", db.setting(G, "confirm_deletes", "0") == "0")
+eid = new_raid("Quick")
+i = inter(officer)
+run(B.raid_cancel.callback(i, eid))
+check("cancel deletes at once, privately, and points at /raid restore",
+      db.event(eid) is None and db.cancelled_event(eid) and "/raid restore" in text(i) and "view" not in i.response.sent[0][1]
+      and i.response.sent[0][1].get("ephemeral") is True, text(i))
+db.restore_event(eid)
+i = inter(officer)
+run(B.raid_remove.callback(i, eid, raider))
+check("remove removes at once", db.signup(eid, 50) is None and "Removed <@50>" in text(i), text(i))
+i = inter(officer)
+run(B.config_confirm.callback(i, True))
+check("/config confirm on turns the question on", db.setting(G, "confirm_deletes") == "1" and "ask first" in text(i))
+i = inter(officer)
+run(B.config_show.callback(i))
+check("/config show lists it", "Ask before cancel / remove:** on" in text(i), text(i))
+
+DMS.clear()  # removing Thrall above moved Jaina off the bench and told her
+
+print("/raid cancel asks first when it's on")
 eid = new_raid()
 i = inter(officer)
 run(B.raid_cancel.callback(i, eid))
@@ -252,7 +273,7 @@ data["from_the_future"] = 1
 db._run("UPDATE cancelled_events SET event_json=? WHERE event_id=?", (json.dumps(data), other))
 check("a copy with an unknown column still restores", db.restore_event(other) == 3 and db.event(other) is not None)
 
-print("/raid remove asks first")
+print("/raid remove asks first when it's on")
 eid = new_raid("Gruul")
 i = inter(officer)
 run(B.raid_remove.callback(i, eid, raider))
@@ -267,6 +288,11 @@ i = inter(officer)
 run(B.raid_remove.callback(i, eid, raider))
 check("removing someone who isn't signed up says so, without a question",
       "isn't signed up" in text(i) and "view" not in i.response.sent[0][1], text(i))
+
+i = inter(officer)
+run(B.config_confirm.callback(i, False))
+check("/config confirm off turns it back off and mentions /raid restore",
+      db.setting(G, "confirm_deletes") == "0" and "/raid restore" in text(i), text(i))
 
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

@@ -287,9 +287,9 @@ on any single date. `/always list` shows what you're in, and `/always leave` sto
 | Officers | `/raid roster` | A private, copy-friendly list of who's coming |
 | Officers | `/raid noshow` | Mark someone who signed up but didn't turn up (add `undo: True` to take it back) |
 | Officers | `/raid close` | Close signups (run it again to reopen) |
-| Officers | `/raid cancel` | Delete a raid and its post (and thread). It asks first, and `/raid restore` undoes it |
+| Officers | `/raid cancel` | Delete a raid and its post (and thread). `/raid restore` undoes it |
 | Officers | `/raid restore` | Bring back a raid cancelled in the last 14 days, with all its signups, as a new post |
-| Officers | `/raid remove` | Remove someone's signup (it asks first) |
+| Officers | `/raid remove` | Remove someone's signup |
 | Officers | `/raid unsigned` | List (or ping) members of a role who haven't answered |
 | Officers | `/stats team` | Everyone's attendance |
 | Officers | `/stats export` | The same as a spreadsheet file (CSV). It has Discord ids, so keep it private |
@@ -298,6 +298,7 @@ on any single date. `/always list` shows what you're in, and `/always leave` sto
 | Admins | `/config channel` | Per-channel (or per-category) ping role and raid-leader role |
 | Admins | `/config threads / archive / nudge / logchannel` | Optional extras. All are **off** until you turn them on |
 | Admins | `/config raiderrole` | Only members with this role can sign up (default: anyone) |
+| Admins | `/config confirm` | Ask "are you sure?" before `/raid cancel` and `/raid remove` (default: off) |
 | Admins | `/config autoclose` | Close sign-ups a set number of hours before a raid (default: off) |
 | Admins | `/config voicechannel` | Mark no-shows automatically from a voice channel (default: off). `/config channel voice:` sets one per raid team |
 | Admins | `/config buffs` | Warn on the post when nobody can provide Bloodlust or a battle res (default: off) |

@@ -510,7 +510,7 @@ press(view, "Back")
 print("/config setup: extras")
 press(view, "Extras")
 toggles = [c.label for c in view.children]
-check("five switches and Back on retail", len(toggles) == 6 and toggles[-1] == "Back" and "Raider.IO import: " in " ".join(toggles), toggles)
+check("six switches and Back on retail (Confirm deletes since v1.13)", len(toggles) == 7 and toggles[-1] == "Back" and "Raider.IO import: " in " ".join(toggles) and "Confirm deletes: off" in toggles, toggles)
 before = db.setting(G, "threads")
 press(view, "Discussion threads: off")
 check("a switch flips the setting", db.setting(G, "threads") == "1")

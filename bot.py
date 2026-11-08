@@ -35,7 +35,7 @@ load_dotenv(ENV_PATH)
 
 import checks  # noqa: E402
 import wow_data as wd  # noqa: E402  # noqa: E402  (after load_dotenv so WOW_VERSION is read)
-from db import KEEP_CANCELLED_DAYS, caps_dict, caps_text, open_database  # noqa: E402
+from db import KEEP_CANCELLED_DAYS, caps_dict, caps_text, clean_realm, open_database  # noqa: E402
 from embeds import build_embed, text_problem  # noqa: E402
 
 def _env_int(name: str, default: int) -> int:
@@ -177,8 +177,11 @@ def may_sign_up(interaction: discord.Interaction) -> bool:
 
 
 def render_embed(event, signups, locked: bool):
-    """The raid post, with the optional missing-utility warnings if /config buffs is on."""
-    return build_embed(event, signups, locked, buffs=db.setting(event["guild_id"], "buffs") == "1")
+    """The raid post, with the optional missing-utility warnings if /config buffs is on, and realms after the
+    character names if /config realms is on."""
+    g = event["guild_id"]
+    realms = db.realms_for(signups) if db.setting(g, "show_realms") == "1" else None
+    return build_embed(event, signups, locked, buffs=db.setting(g, "buffs") == "1", realms=realms)
 
 
 def autoclose_inside(guild_id: int, start_ts: int) -> bool:
@@ -358,7 +361,7 @@ class CharacterSelect(discord.ui.Select):
         # No option is preselected: choosing an already-selected option sends nothing to the bot, which
         # would leave a player with one saved character unable to sign up. The main is starred instead.
         opts = [discord.SelectOption(label=(("⭐ " if c["is_main"] else "") + c["name"])[:100],
-                                     description=f"{c['spec']} {c['wow_class']}"[:100],
+                                     description=f"{c['spec']} {c['wow_class']}{' · ' + realm_of(c) if realm_of(c) else ''}"[:100],
                                      value=str(c["id"]))
                 for c in chars[:25]]
         super().__init__(placeholder="Pick a character…", options=opts)
@@ -631,6 +634,7 @@ async def raiderio_lookup(region: str, realm: str, name: str) -> dict:
     link = data.get("profile_url")
     return {"name": str(data.get("name") or name).strip()[:32], "class": cls,
             "spec": wd.find_spec(cls, data.get("active_spec_name")),
+            "realm": clean_realm(data.get("realm") if isinstance(data.get("realm"), str) else ""),
             "ilvl": int(ilvl) if isinstance(ilvl, (int, float)) else None,
             "url": link if isinstance(link, str) and link.startswith("https://raider.io/") else None}
 
@@ -665,16 +669,27 @@ async def spec_autocomplete(interaction: discord.Interaction, current: str):
             if current.lower() in s.lower()][:25]
 
 
+def realm_of(c) -> str:
+    """A saved character's realm ('' if none). Works for database rows and plain dicts."""
+    return (c["realm"] if "realm" in c.keys() else "") or ""
+
+
+def char_label(c) -> str:
+    """'Thrall-Area 52 (Restoration Shaman)' for menus; no realm part when none is saved."""
+    return f"{c['name']}{'-' + realm_of(c) if realm_of(c) else ''} ({c['spec']} {c['wow_class']})"[:100]
+
+
 async def own_char_autocomplete(interaction: discord.Interaction, current: str):
-    return [app_commands.Choice(name=f"{c['name']} ({c['spec']} {c['wow_class']})", value=c["name"])
+    return [app_commands.Choice(name=char_label(c), value=c["name"])
             for c in db.characters(interaction.user.id) if current.lower() in c["name"].lower()][:25]
 
 
 @character.command(name="add", description="Add a character (or change the spec of an existing one)")
-@app_commands.describe(name="Character name", wowclass="Class", spec="Spec", main="Make this your main")
+@app_commands.describe(name="Character name", wowclass="Class", spec="Spec", main="Make this your main",
+                       realm="Realm (optional, e.g. Area 52). Leave it out to keep the one already saved")
 @app_commands.autocomplete(wowclass=class_autocomplete, spec=spec_autocomplete)
 async def character_add(interaction: discord.Interaction, name: str, wowclass: str, spec: str,
-                        main: bool = False):
+                        main: bool = False, realm: Optional[str] = None):
     cls = wd.find_class(wowclass)
     if not cls:
         return await interaction.response.send_message(
@@ -688,8 +703,13 @@ async def character_add(interaction: discord.Interaction, name: str, wowclass: s
         return await interaction.response.send_message(
             f"You already have {MAX_CHARACTERS} characters, which is the most the sign-up menu can show. "
             "Remove one with `/character remove` first.", ephemeral=True)
-    db.upsert_character(interaction.user.id, name, cls, sp, wd.role_for(cls, sp), main)
-    await interaction.response.send_message(f"Saved **{name}** — {sp} {cls}.", ephemeral=True)
+    if realm is not None and realm.strip() and not clean_realm(realm):
+        return await interaction.response.send_message(
+            "That doesn't look like a realm name. Use letters, numbers, spaces, ' and -, e.g. `Area 52`.", ephemeral=True)
+    db.upsert_character(interaction.user.id, name, cls, sp, wd.role_for(cls, sp), main, realm)
+    saved = db.character_by_name(interaction.user.id, name)
+    where = f" on {saved['realm']}" if saved["realm"] else ""
+    await interaction.response.send_message(f"Saved **{saved['name']}**{where} — {sp} {cls}.", ephemeral=True)
 
 
 @character.command(name="list", description="Show your characters")
@@ -698,9 +718,27 @@ async def character_list(interaction: discord.Interaction):
     if not chars:
         return await interaction.response.send_message("No characters yet. Use `/character add`.",
                                                        ephemeral=True)
-    lines = [f"{'⭐ ' if c['is_main'] else ''}**{c['name']}** — {c['spec']} {c['wow_class']} ({c['role']})"
-             for c in chars]
+    lines = [f"{'⭐ ' if c['is_main'] else ''}**{c['name']}**{' · ' + c['realm'] if c['realm'] else ''} — "
+             f"{c['spec']} {c['wow_class']} ({c['role']})" for c in chars]
+    if not any(c["realm"] for c in chars):
+        lines.append("-# Add a realm with `/character realm` if you like (optional).")
     await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+
+@character.command(name="realm", description="Set or clear the realm of one of your characters")
+@app_commands.describe(name="Your character", realm="Realm, e.g. Area 52. Leave it out to clear it")
+@app_commands.autocomplete(name=own_char_autocomplete)
+async def character_realm(interaction: discord.Interaction, name: str, realm: Optional[str] = None):
+    c = db.character_by_name(interaction.user.id, name)
+    if not c:
+        return await interaction.response.send_message("Character not found.", ephemeral=True)
+    if realm and realm.strip() and not clean_realm(realm):
+        return await interaction.response.send_message(
+            "That doesn't look like a realm name. Use letters, numbers, spaces, ' and -, e.g. `Area 52`.", ephemeral=True)
+    db.set_realm(interaction.user.id, c["id"], realm)
+    new = clean_realm(realm)
+    await interaction.response.send_message(
+        f"**{c['name']}** is now on **{new}**." if new else f"Cleared the realm of **{c['name']}**.", ephemeral=True)
 
 
 @character.command(name="main", description="Set your main character")
@@ -766,11 +804,11 @@ async def character_import(interaction: discord.Interaction, name: str, realm: O
             f"You already have {MAX_CHARACTERS} characters, which is the most the sign-up menu can show. "
             "Remove one with `/character remove` first.", ephemeral=True)
     db.upsert_character(interaction.user.id, found["name"], found["class"], found["spec"],
-                        wd.role_for(found["class"], found["spec"]), main)
+                        wd.role_for(found["class"], found["spec"]), main, found.get("realm") or realm)
     extra = f", item level {found['ilvl']}" if found["ilvl"] else ""
     link = f" <{found['url']}>" if found["url"] else ""
     await interaction.followup.send(
-        f"Saved **{found['name']}** — {found['spec']} {found['class']}{extra}.{link}\n"
+        f"Saved **{found['name']}** on {found.get('realm') or clean_realm(realm)} — {found['spec']} {found['class']}{extra}.{link}\n"
         "(To look it up I sent the name and realm you typed to raider.io. Nothing else is shared.)", ephemeral=True)
 
 
@@ -1377,7 +1415,7 @@ async def member_character_autocomplete(interaction: discord.Interaction, curren
     uid = getattr(getattr(interaction.namespace, "member", None), "id", None)
     if not uid:
         return []
-    return [app_commands.Choice(name=f"{c['name']} ({c['spec']} {c['wow_class']})"[:100], value=c["name"])
+    return [app_commands.Choice(name=char_label(c), value=c["name"])
             for c in db.characters(uid) if current.lower() in c["name"].lower()][:25]
 
 
@@ -2551,6 +2589,7 @@ class SetupView(discord.ui.View):
         self._toggle("digest", "Weekly digest")
         self._toggle("update_notice", "Update notice")
         self._toggle("confirm_deletes", "Confirm deletes")
+        self._toggle("show_realms", "Realms on posts")
         if wd.PRESET_NAME == "retail":
             self._toggle("raiderio", "Raider.IO import")
         self._back(1)
@@ -2578,6 +2617,7 @@ async def config_show(interaction: discord.Interaction):
     lines.append(f"**Missing-utility warnings:** {'on' if db.setting(g, 'buffs') == '1' else 'off'}")
     lines.append(f"**Weekly attendance digest:** {'on' if db.setting(g, 'digest') == '1' else 'off'}")
     lines.append(f"**Ask before cancel / remove:** {'on' if db.setting(g, 'confirm_deletes') == '1' else 'off'}")
+    lines.append(f"**Realms on raid posts:** {'on' if db.setting(g, 'show_realms') == '1' else 'off'}")
     backup_ch = db.setting(g, "backup_channel")
     lines.append(f"**Daily backup post:** {f'<#{backup_ch}>' if backup_ch else 'off'}")
     nudge = int(db.setting(g, "nudge_hours", 0))
@@ -2776,6 +2816,18 @@ async def config_confirm(interaction: discord.Interaction, on: bool):
         f"`/raid restore` for {KEEP_CANCELLED_DAYS} days.", ephemeral=True)
 
 
+@config.command(name="realms", description="Show each character's realm after the name on raid posts (off by default)")
+@app_commands.describe(on="True = e.g. Thrall (Area 52), for characters whose player saved a realm")
+async def config_realms(interaction: discord.Interaction, on: bool):
+    db.set_setting(interaction.guild_id, "show_realms", "1" if on else "0")
+    for upcoming in db.upcoming_events(interaction.guild_id, int(time.time()))[:25]:  # redraw the open posts now
+        if upcoming["message_id"]:
+            await refresh_message(upcoming["id"])
+    await interaction.response.send_message(
+        "Raid posts now show the realm after a character's name, when its player saved one (`/character realm`)."
+        if on else "Raid posts show character names only. Players' saved realms are kept.", ephemeral=True)
+
+
 @config.command(name="updatenotice", description="Say in the log channel when a newer version of the bot is released (off by default)")
 @app_commands.describe(on="True = check GitHub about once a day. It sends no information about your server")
 async def config_updatenotice(interaction: discord.Interaction, on: bool):
@@ -2884,7 +2936,7 @@ async def help_command(interaction: discord.Interaction):
         "On a raid post press **Sign Up** and pick a character or class and spec. "
         "**Late / Tentative / Bench / Absent** change your status.\n"
         "`/character add` save a character (do this once, then sign up in one click)\n"
-        "`/character list` · `/character main` · `/character remove`\n"
+        "`/character list` · `/character main` · `/character realm` · `/character remove`\n"
         "`/remindme` get reminders as a private message · `/always join` stay signed up to a repeating raid\n"
         "`/forgetme` delete your characters and signup history from the bot\n"
         "`/character import` look a retail character up on Raider.IO (if your admin turned it on)\n"
@@ -2907,7 +2959,7 @@ async def help_command(interaction: discord.Interaction):
         "`/config raiderrole` only that role can sign up · `/config autoclose` close sign-ups before the start\n"
         "`/config voicechannel` automatic no-shows from a voice channel · `/config buffs` warn about missing Bloodlust / battle res\n"
         "`/config digest` weekly attendance summary. Officers can also limit classes: `/raid create classes: Mage 4`\n"
-        "`/config setup` guided panel for the main settings · `/config raiderio` · `/config updatenotice` · `/config confirm`\n"
+        "`/config setup` guided panel for the main settings · `/config raiderio` · `/config updatenotice` · `/config confirm` · `/config realms`\n"
         "`/config backup` get a copy of the database · `/status` bot health check"))
     embed.set_footer(text="Anyone on the bench is moved in automatically when a slot opens.")
     await interaction.response.send_message(embed=embed, ephemeral=True)

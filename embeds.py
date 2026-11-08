@@ -26,11 +26,12 @@ def _number_map(signups) -> dict[int, int]:
     return {s["user_id"]: i for i, s in enumerate(signups, start=1)}
 
 
-def _entry(s, num: dict[int, int]) -> str:
+def _entry(s, num: dict[int, int], realms: dict | None = None) -> str:
     n = f"`{num[s['user_id']]}`"
     if not s["char_name"]:
         return f"{n} <@{s['user_id']}>"
-    return f"{n} {wd.class_emoji(s['wow_class'])} **{s['char_name']}**"
+    realm = (realms or {}).get(s["user_id"])
+    return f"{n} {wd.class_emoji(s['wow_class'])} **{s['char_name']}**" + (f" ({realm})" if realm else "")
 
 
 def _column(entries: list[str]) -> str:
@@ -49,10 +50,12 @@ def _clip(text: str, limit: int = 1024) -> str:
     return (cut[:at] if at > 0 else cut) + "…"
 
 
-def _oneline(icon: str, label: str, rows, num, limit: int = 1024, suffix=None) -> str:
-    suffix = suffix or {}
+def _oneline(icon: str, label: str, rows, num, limit: int = 1024, suffix=None, realms=None) -> str:
+    suffix, realms = suffix or {}, realms or {}
     names = ", ".join(
-        (f"`{num[s['user_id']]}` **{s['char_name']}**" if s["char_name"] else f"`{num[s['user_id']]}` <@{s['user_id']}>")
+        (f"`{num[s['user_id']]}` **{s['char_name']}**" + (f" ({realms[s['user_id']]})" if s["user_id"] in realms else "")
+         if s["char_name"]
+         else f"`{num[s['user_id']]}` <@{s['user_id']}>")
         + suffix.get(s["user_id"], "")
         for s in rows)
     return _clip(f"{icon} **{label} ({len(rows)})** : {names}", limit)
@@ -82,18 +85,19 @@ def utility_warnings(attending) -> list[str]:
             for label, classes in wd.UTILITY.values() if not have & set(classes)]
 
 
-def build_embed(event, signups, locked: bool, buffs: bool = False) -> discord.Embed:
+def build_embed(event, signups, locked: bool, buffs: bool = False, realms: dict | None = None) -> discord.Embed:
     """The raid post. Roster fields are shortened as far as needed to keep the whole embed under
-    Discord's 6000-character limit, so a long description plus a full roster can't make it fail."""
+    Discord's 6000-character limit, so a long description plus a full roster can't make it fail.
+    realms ({user_id: realm}, only when /config realms is on) adds each character's realm after the name."""
     limit = 1024
-    embed = _build(event, signups, locked, limit, buffs)
+    embed = _build(event, signups, locked, limit, buffs, realms)
     while len(embed) > EMBED_BUDGET and limit > 120:
         limit = int(limit * 0.8)
-        embed = _build(event, signups, locked, limit, buffs)
+        embed = _build(event, signups, locked, limit, buffs, realms)
     return embed
 
 
-def _build(event, signups, locked: bool, limit: int, buffs: bool = False) -> discord.Embed:
+def _build(event, signups, locked: bool, limit: int, buffs: bool = False, realms: dict | None = None) -> discord.Embed:
     ts = event["start_ts"]
     num = _number_map(signups)
     embed = discord.Embed(title=_clip(event["title"], TITLE_MAX),
@@ -123,14 +127,14 @@ def _build(event, signups, locked: bool, limit: int, buffs: bool = False) -> dis
 
     embed.add_field(
         name=f"{wd.GROUP_ICON['tank']} Tank ({count('tank', tanks)})",
-        value=_clip(_column([_entry(s, num) for s in tanks]) +
+        value=_clip(_column([_entry(s, num, realms) for s in tanks]) +
                     f"\n\n**{wd.GROUP_ICON['healer']} Healer ({count('healer', healers)})**\n" +
-                    _column([_entry(s, num) for s in healers]), limit),
+                    _column([_entry(s, num, realms) for s in healers]), limit),
         inline=True)
     embed.add_field(name=f"{wd.GROUP_ICON['melee']} Melee ({len(melee)})",
-                    value=_clip(_column([_entry(s, num) for s in melee]), limit), inline=True)
+                    value=_clip(_column([_entry(s, num, realms) for s in melee]), limit), inline=True)
     embed.add_field(name=f"{wd.GROUP_ICON['ranged']} Ranged ({len(ranged)})",
-                    value=_clip(_column([_entry(s, num) for s in ranged]), limit), inline=True)
+                    value=_clip(_column([_entry(s, num, realms) for s in ranged]), limit), inline=True)
 
     # Composition warnings (only while signups are open)
     if not locked:
@@ -151,7 +155,7 @@ def _build(event, signups, locked: bool, limit: int, buffs: bool = False) -> dis
                     place[key] = place.get(key, 0) + 1
                     queue[s["user_id"]] = f" (#{place[key]} {key})"
         if rows:
-            embed.add_field(name=ZWS, value=_oneline(icon, label, rows, num, limit, queue), inline=False)
+            embed.add_field(name=ZWS, value=_oneline(icon, label, rows, num, limit, queue, realms), inline=False)
 
     footer = f"Event #{event['id']}"
     if event["cap_dps"]:

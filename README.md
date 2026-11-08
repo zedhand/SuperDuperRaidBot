@@ -222,7 +222,7 @@ Times are in the timezone chosen during setup (change it any time with `/config 
 sees the time in **their own** timezone with a live countdown.
 
 ### Signing up (players)
-1. **Once:** save your characters with `/character add` (name, class, spec). Pick one as your **main** with `/character main`.
+1. **Once:** save your characters with `/character add` (name, class, spec, and optionally the realm). Pick one as your **main** with `/character main`.
 2. On a raid post click **Sign Up**. If you've signed up before, the top button is **⚡ Sign up as (your last character)**:
    one click and you're in. (Your main is used the very first time.) Or choose a different saved character (your main is
    marked ⭐), **or** pick a class and spec on the spot if you haven't saved one.
@@ -271,6 +271,7 @@ on any single date. `/always list` shows what you're in, and `/always leave` sto
 | Who | Command | What it does |
 |---|---|---|
 | Everyone | `/character add / list / main / remove` | Manage your saved characters |
+| Everyone | `/character realm` | Set or clear the realm of a saved character (optional; `/character add realm:` works too) |
 | Everyone | `/myraids` | The upcoming raids you've answered, with links |
 | Everyone | `/remindme` | Get raid reminders as a private message instead of a channel ping |
 | Everyone | `/forgetme` | Delete your characters and signup history from the bot (asks first, can't be undone) |
@@ -299,6 +300,7 @@ on any single date. `/always list` shows what you're in, and `/always leave` sto
 | Admins | `/config channel` | Per-channel (or per-category) ping role and raid-leader role |
 | Admins | `/config threads / archive / nudge / logchannel` | Optional extras. All are **off** until you turn them on |
 | Admins | `/config raiderrole` | Only members with this role can sign up (default: anyone) |
+| Admins | `/config realms` | Show each character's realm after the name on raid posts, e.g. `Thrall (Area 52)` (default: off) |
 | Admins | `/config confirm` | Ask "are you sure?" before `/raid cancel` and `/raid remove` (default: off) |
 | Admins | `/config autoclose` | Close sign-ups a set number of hours before a raid (default: off) |
 | Admins | `/config voicechannel` | Mark no-shows automatically from a voice channel (default: off). `/config channel voice:` sets one per raid team |

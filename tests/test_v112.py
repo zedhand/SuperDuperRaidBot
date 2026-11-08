@@ -97,6 +97,15 @@ def reply(i):
     return msgs[0][0][0] if msgs and msgs[0][0] else ""
 
 
+
+def same(a, b) -> bool:
+    """True if two paths are the same file or folder, whichever way Windows spells them (False if either is missing)."""
+    try:
+        return Path(a).samefile(b)
+    except OSError:
+        return False
+
+
 admin = member(1, admin=True)
 http_error = discord.HTTPException(types.SimpleNamespace(status=500, reason="x"), "server error")
 
@@ -543,7 +552,8 @@ if WINDOWS:
     link = desk / checks.SHORTCUT_NAME
     check("switching it on creates a real Windows shortcut", msg == "Added the desktop shortcut." and link.exists(), msg)
     target, workdir = checks.read_shortcut(link)
-    check("pointing at start.bat, starting in the bot's folder", Path(target) == base / "start.bat" and Path(workdir) == base, (target, workdir))
+    # Windows may hand one path back in its old short form (RUNNER~1) and another in the long form: compare the files, not the text
+    check("pointing at start.bat, starting in the bot's folder", same(target, base / "start.bat") and same(workdir, base), (target, workdir))
     check("switching it again removes it", checks.toggle_shortcut("Desktop", base) == "Removed the desktop shortcut." and not link.exists())
     check("the startup shortcut works the same way", checks.toggle_shortcut("Startup", base).startswith("Added") and (startup / checks.SHORTCUT_NAME).exists())
     checks.toggle_shortcut("Startup", base)

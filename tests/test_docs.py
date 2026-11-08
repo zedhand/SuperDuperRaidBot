@@ -88,5 +88,12 @@ for name in ("LICENSE", "CONTRIBUTING.md", "ROADMAP.md", "SECURITY.md", ".env.ex
     check(f"{name} exists", (root / name).exists())
 check("issue templates exist", (root / ".github" / "ISSUE_TEMPLATE" / "bug_report.yml").exists())
 
+print("the updater delivers every program file")
+ps = (root / "update.ps1").read_text(encoding="utf-8")
+listed = set(re.findall(r'"([^"]+\.(?:py|bat))"', ps[ps.index("$code = @("):ps.index(")", ps.index("$code = @("))]))
+shipped = {p.name for p in root.glob("*.py")}
+check("every top-level .py file is in update.ps1's file list (a file it skipped would break updating)",
+      shipped <= listed, sorted(shipped - listed))
+
 print(f"\n{'all passed' if not failed else str(failed) + ' failed'}")
 sys.exit(1 if failed else 0)

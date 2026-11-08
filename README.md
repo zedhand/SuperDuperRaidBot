@@ -199,13 +199,20 @@ Numbers show the order people signed up in. If a class icon is available (see [C
 
 ### Your first raid (officers)
 1. Go to the channel where you want the raid posted (your signup channel).
-2. Type `/raid create` and press Enter. Discord shows the options. Fill in **date** (`2026-11-14`), **time** (24-hour,
-   `20:00`) and, if you like, a **title**, and the maximum number of **tanks**, **healers** and **dps** (`0` means no limit).
+2. Type `/raid create` and press Enter. Discord shows the options. Fill in **date** and, if you like, a **title**, and the
+   maximum number of **tanks**, **healers** and **dps** (`0` means no limit). Pick the day from the list Discord offers, or
+   just type it, with the time on the end: `thu 8pm`, `tomorrow 19:30`, `nov 14 8pm`, `+7d 20:00` or `2026-11-14 20:00`.
+   (You can also use the separate **time** box: `20:00` or `8pm`.)
 3. A **raid post** appears with buttons. Players click **Sign Up**.
 
 ```
-/raid create   date: 2026-11-14   time: 20:00   title: Naxxramas   tanks: 2   healers: 6   dps: 17   ping: @Raiders
+/raid create   date: thu 8pm   title: Naxxramas   tanks: 2   healers: 6   dps: 17   ping: @Raiders
 ```
+
+How dates are read: a bare weekday (`thu`) is the next one, and today if its time hasn't passed yet; `next thu` is never today;
+`nov 14` is the next November 14; a bare number like `8` is refused (morning or evening?), so write `8pm` or `20:00`. Times are in
+your server's timezone. If a time doesn't exist (clocks jump forward) or happens twice (clocks go back), the bot says so.
+The same date entry works in `/raid copy` and `/raid edit` (in `/raid edit` you can change just the day or just the time).
 
 Times are in the timezone chosen during setup (change it any time with `/config timezone`). On the post itself, every player
 sees the time in **their own** timezone with a live countdown.
@@ -245,6 +252,8 @@ no saved character, the bot asks you to press **Sign Up** first.
 | Everyone | `/stats me` | Your own attendance (last 90 days) |
 | Everyone | `/help` | Command list inside Discord |
 | Officers | `/raid create` | Post a raid (options: title, template, description, tanks, healers, dps, ping, repeat, thread) |
+| Officers | `/raid list` | Your upcoming raids with sign-up counts, times and links |
+| Officers | `/raid add` | Sign someone up, or change their status or character (works even if sign-ups are closed) |
 | Officers | `/raid edit` | Change title, date, time, description or limits. If the time changes, signed-up people are told |
 | Officers | `/raid copy` | The same raid on a new date (same limits and description, no signups) |
 | Officers | `/raid repeat` | Repeat weekly or every 2 weeks, or stop repeating |
@@ -260,6 +269,8 @@ no saved character, the bot asks you to press **Sign Up** first.
 | Admins | `/config timezone / reminder / officer / pingrole` | Server-wide settings |
 | Admins | `/config channel` | Per-channel (or per-category) ping role and raid-leader role |
 | Admins | `/config threads / archive / nudge / logchannel` | Optional extras. All are **off** until you turn them on |
+| Admins | `/config raiderrole` | Only members with this role can sign up (default: anyone) |
+| Admins | `/config autoclose` | Close sign-ups a set number of hours before a raid (default: off) |
 | Admins | `/config backup` | Sends you a private copy of the database as a file |
 | Admins | `/status` | Health check: version, uptime, channel permissions, last backup, last problem |
 
@@ -267,6 +278,8 @@ no saved character, the bot asks you to press **Sign Up** first.
 - `/config threads` starts a discussion thread under every new raid.
 - `/config archive` deletes raid posts a set number of days after they start. Records are kept.
 - `/config nudge` pings people in a raid's ping role who haven't answered, a set number of hours before the raid.
+- `/config raiderrole` limits sign-ups to one role. Officers are always allowed, and can sign people up with `/raid add`.
+- `/config autoclose` closes sign-ups that many hours before the start. Reopen a raid any time with `/raid close`.
 - `/config logchannel` posts a one-line note whenever a raid is created, edited, cancelled, closed or someone is marked a no-show.
 
 ### Who can do what
@@ -320,7 +333,7 @@ its own bot token) for a second server.
 **How do I get class icons?** They're not included, because the artwork belongs to Blizzard. Without them the bot uses coloured
 squares. To use icons, put images named after each class in the `icons` folder (see `icons/README.txt`).
 
-**A player made a mistake. Can an officer fix their signup?** Yes. Use `/raid remove` to clear it, and they can sign up again.
+**A player made a mistake. Can an officer fix their signup?** Yes. Use `/raid remove` to clear it, or `/raid add` to set their status, character or spec for them.
 
 **What if I move to a new computer?** Copy the whole bot folder, or at least `raidbot.db` and `.env`, to the new computer and
 run `start.bat`. Everyone's characters and raids carry over.

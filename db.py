@@ -71,6 +71,7 @@ MIGRATIONS = (
     ("events", "archived", "INTEGER NOT NULL DEFAULT 0"),     # v1.7: post deleted by cleanup
     ("events", "nudged", "INTEGER NOT NULL DEFAULT 0"),       # v1.8: "who hasn't answered" ping sent
     ("signups", "no_show", "INTEGER NOT NULL DEFAULT 0"),     # v1.8: signed up but didn't turn up
+    ("events", "autoclosed", "INTEGER NOT NULL DEFAULT 0"),   # v1.9: the automatic sign-up closing has run
 )
 
 
@@ -202,7 +203,7 @@ class DB:
 
     def update_event(self, event_id, **fields):
         allowed = {"title", "description", "start_ts", "cap_tank", "cap_healer", "cap_dps", "reminded",
-                   "lock_shown", "repeat_days", "repeated", "thread_id", "archived", "nudged"}
+                   "lock_shown", "repeat_days", "repeated", "thread_id", "archived", "nudged", "autoclosed"}
         fields = {k: v for k, v in fields.items() if k in allowed}
         if fields:
             # column names are filtered through the allow-list above, values are bound parameters
@@ -212,6 +213,10 @@ class DB:
     def pending_nudges(self, now):
         """Upcoming events whose 'who hasn't answered' ping hasn't gone out. Caller applies the setting."""
         return self._all("SELECT * FROM events WHERE nudged=0 AND closed=0 AND message_id!=0 AND start_ts>?", (now,))
+
+    def pending_autoclose(self, now):
+        """Upcoming, still-open events whose automatic sign-up closing hasn't run. Caller applies the setting."""
+        return self._all("SELECT * FROM events WHERE autoclosed=0 AND closed=0 AND message_id!=0 AND start_ts>?", (now,))
 
     def due_repeat(self, now):
         """Recurring raids that have started but haven't posted their next occurrence yet."""

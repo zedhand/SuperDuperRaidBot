@@ -1,5 +1,5 @@
 """Offline tests for v1.13/v1.14: the WoW version presets, confirm/undo for /raid cancel and /raid remove, /forgetme,
-the daily backup post, realms on characters, signup notes and the Spec button (more suites are added below as features land).
+the daily backup post, realms on characters, signup notes, the Spec button and /raid promote (more suites are added below as features land).
 
 Run:  python -I tests/test_v113.py        (or python tests/run_all.py for every suite)
 """
@@ -859,6 +859,59 @@ i = inter(officer)
 run(B.config_specswitch.callback(i, False))
 check("/config specswitch off takes the button away from the posts again", not B.spec_switch_on(G)
       and "raid:spec" not in [c.custom_id for c in CH[11].edits[-1][1]["view"].children] and "Sign Up" in text(i), text(i))
+
+print("/raid promote moves a chosen benched player in")
+pr = db.create_event(G, 11, "Promote night", "", int(time.time()) + 86400, 1, 1, 1, 2)  # 1 tank, 1 healer, 2 dps
+db.set_message_id(pr, 880)
+db.set_signup(pr, 700, "Tank", "Warrior", "Protection", "tank", "in", None)
+db.set_signup(pr, 701, "Heals", "Priest", "Holy", "healer", "bench", None)        # chose bench themselves
+db.set_signup(pr, 702, "Firsty", "Mage", "Frost", "dps", "in", None)
+db.set_signup(pr, 703, "Secondy", "Rogue", "Combat" if wd.find_spec("Rogue", "Combat") else "Outlaw", "dps", "in", None)
+db.set_signup(pr, 704, "Waiter", "Hunter", "Marksmanship", "dps", "bench", "late")   # benched by the bot, wanted late
+db.set_signup(pr, 705, "Second", "Warlock", "Affliction", "dps", "bench", "in")
+db.set_signup(pr, 706, None, None, None, None, "absent", None)
+DMS.clear()
+CH[11].edits.clear()
+
+i = inter(officer)
+run(B.raid_promote.callback(i, pr, member(701)))
+row = db.signup(pr, 701)
+check("a benched player whose role has room moves in, privately confirmed", row["status"] == "in" and row["bench_from"] is None
+      and "now **in**" in text(i) and i.response.sent[0][1].get("ephemeral") is True, (dict(row), text(i)))
+check("the player is told", any(uid == 701 and "off the bench" in t for uid, t in DMS), DMS)
+check("and the post is redrawn", any(m == 880 for m, _ in CH[11].edits))
+
+i = inter(officer)
+run(B.raid_promote.callback(i, pr, member(705)))
+check("a full role is refused by default and nothing changes", db.signup(pr, 705)["status"] == "bench"
+      and "Nothing was changed" in text(i) and "DPS slots are full" in text(i) and "over_limit" in text(i), text(i))
+
+i = inter(officer)
+run(B.raid_promote.callback(i, pr, member(705), True))
+check("over_limit takes them in anyway, ahead of the one first in line", db.signup(pr, 705)["status"] == "in"
+      and db.signup(pr, 704)["status"] == "bench" and "over the limit" in text(i), text(i))
+check("the one first in line keeps their place", db.bench_wait(pr, 704) == (1, "dps"), db.bench_wait(pr, 704))
+
+i = inter(officer)
+run(B.raid_promote.callback(i, pr, member(704), True))
+check("someone the bot benched while they asked for late comes in as late", db.signup(pr, 704)["status"] == "late", text(i))
+
+for uid, why in ((702, "is **in**"), (706, "is **absent**"), (799, "isn't signed up")):
+    i = inter(officer)
+    run(B.raid_promote.callback(i, pr, member(uid)))
+    check(f"someone who {why.replace('*', '')} is pointed at /raid add", why in text(i) and "/raid add" in text(i), text(i))
+
+db.set_signup(pr, 707, None, None, None, None, "bench", None)
+i = inter(officer)
+run(B.raid_promote.callback(i, pr, member(707)))
+check("a bench without a character is pointed at /raid add", "without a character" in text(i)
+      and db.signup(pr, 707)["status"] == "bench", text(i))
+
+db.update_event(pr, start_ts=int(time.time()) - 60)
+db.set_signup(pr, 708, "Late", "Druid", "Balance", "dps", "bench", None)
+i = inter(officer)
+run(B.raid_promote.callback(i, pr, member(708), True))
+check("a raid that has started can't be changed", "already started" in text(i) and db.signup(pr, 708)["status"] == "bench")
 
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

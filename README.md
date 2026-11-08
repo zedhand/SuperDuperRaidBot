@@ -291,6 +291,7 @@ on any single date. `/always list` shows what you're in, and `/always leave` sto
 | Officers | `/raid create` | Post a raid (options: title, template, description, tanks, healers, dps, classes, ping, repeat, thread) |
 | Officers | `/raid list` | Your upcoming raids with sign-up counts, times and links |
 | Officers | `/raid add` | Sign someone up, or change their status or character (works even if sign-ups are closed) |
+| Officers | `/raid promote` | Move a specific benched player into the raid, ahead of the line. Refuses if their role or class is full unless you add `over_limit: True` |
 | Officers | `/raid edit` | Change title, date, time, description or limits. If the time changes, signed-up people are told |
 | Officers | `/raid copy` | The same raid on a new date (same limits and description, no signups) |
 | Officers | `/raid repeat` | Repeat weekly or every 2 weeks, or stop repeating |
@@ -387,6 +388,8 @@ squares. To use icons, put images named after each class in the `icons` folder (
 **Can I get the raid in my phone's calendar?** Yes: press the **📅 Calendar** button on the raid post and open the file it sends you. Raids have no end time, so the calendar shows 3 hours.
 
 **I cancelled the wrong raid. Can I get it back?** Yes, for 14 days. `/raid restore` lists this server's recently cancelled raids; pick one and it is posted again in its channel with everyone's signups. After 14 days the copy is deleted for good.
+
+**Someone is on the bench but we want them in tonight. Can we skip the line?** Yes. `/raid promote` moves that player in straight away and tells them. If their role or class is already full it asks you to free a slot first, or to add `over_limit: True` to take them in anyway.
 
 **A player made a mistake. Can an officer fix their signup?** Yes. Use `/raid remove` to clear it, or `/raid add` to set their status, character or spec for them.
 

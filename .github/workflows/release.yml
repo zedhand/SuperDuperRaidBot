@@ -1,0 +1,59 @@
+name: Release
+
+# Push a version tag (git tag v1.13.0 && git push origin v1.13.0) and this:
+#   1. runs every test suite and the lint/security checks,
+#   2. checks the tag matches VERSION in bot.py and that CHANGELOG.md has a section for it,
+#   3. builds SuperDuperRaidBot-v<version>.zip exactly like the hand-made releases and scans it for secrets,
+#   4. creates a DRAFT release with the zip attached and the CHANGELOG section as the notes.
+# Nothing is public until you open the draft on GitHub, check the notes and press "Publish release".
+# Update.bat only sees published releases, so a draft never reaches anyone.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    uses: ./.github/workflows/tests.yml
+
+  release:
+    name: Build, scan and draft the release
+    needs: checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # needed to create the draft release and upload the zip
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build and scan the zip
+        id: build
+        env:
+          TAG: ${{ github.ref_name }}
+        run: >
+          python .github/scripts/build_release.py
+          --tag "$TAG"
+          --notes "$RUNNER_TEMP/notes.md"
+          --github-output "$GITHUB_OUTPUT"
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          ZIP: ${{ steps.build.outputs.zip }}
+          SHA: ${{ steps.build.outputs.sha256 }}
+        run: |
+          printf '\n---\nsha256 of the zip: `%s`\n' "$SHA" >> "$RUNNER_TEMP/notes.md"
+          gh release create "$TAG" "$ZIP" \
+            --draft \
+            --verify-tag \
+            --title "SuperDuperRaidBot $TAG" \
+            --notes-file "$RUNNER_TEMP/notes.md"
+          echo "Draft release created for $TAG. Review and publish it on the Releases page." >> "$GITHUB_STEP_SUMMARY"

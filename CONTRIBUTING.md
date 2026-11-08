@@ -30,6 +30,13 @@ make a throwaway Discord server and a test bot, then run `python setup.py` and `
 `SETUP.bat` normally deletes itself when it finishes. Inside a git clone it detects the `.git` folder and keeps itself
 (and `setup.py`), so your working tree stays clean.
 
+## Releases
+
+Releases are built by GitHub Actions. Bump `VERSION` in `bot.py`, add a `## <version>` section to `CHANGELOG.md`, then push a
+tag `v<version>`. The Release workflow tests, builds `SuperDuperRaidBot-v<version>.zip`, scans it and opens a draft release.
+To check a build locally: `python .github/scripts/build_release.py` (writes to `dist/`, which is git-ignored). A new file that
+should ship must be added to `FILES` in that script, or the scan rejects it.
+
 ## Pull requests
 
 Small, focused PRs are easiest to review. Describe what changed and why, and mention how you tested it.

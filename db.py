@@ -104,6 +104,7 @@ MIGRATIONS = (
     ("characters", "realm", "TEXT NOT NULL DEFAULT ''"),      # v1.13: optional realm, '' = not set
     ("signups", "note", "TEXT NOT NULL DEFAULT ''"),          # v1.13: the player's short note, '' = none
     ("events", "low_alerted", "INTEGER NOT NULL DEFAULT 0"),  # v1.13: the low-signup check has run
+    ("events", "sched_event_id", "INTEGER NOT NULL DEFAULT 0"),  # v1.13: its Discord Scheduled Event (0 = none, -1 = done/hands off)
 )
 
 
@@ -337,7 +338,7 @@ class DB:
         if not row or self.event(event_id):
             return None
         event = json.loads(row["event_json"])
-        event.update(message_id=0, thread_id=0, archived=0)
+        event.update(message_id=0, thread_id=0, archived=0, sched_event_id=0)  # its Scheduled Event was deleted too
         signups = json.loads(row["signups_json"])
         ev_cols = {r[1] for r in self.conn.execute("PRAGMA table_info(events)")}
         su_cols = {r[1] for r in self.conn.execute("PRAGMA table_info(signups)")}
@@ -414,7 +415,8 @@ class DB:
 
     def update_event(self, event_id, **fields):
         allowed = {"title", "description", "start_ts", "cap_tank", "cap_healer", "cap_dps", "reminded",
-                   "lock_shown", "repeat_days", "repeated", "thread_id", "archived", "nudged", "autoclosed", "series_id", "voice_checked", "class_caps", "low_alerted"}
+                   "lock_shown", "repeat_days", "repeated", "thread_id", "archived", "nudged", "autoclosed", "series_id", "voice_checked", "class_caps", "low_alerted",
+                   "sched_event_id"}
         fields = {k: v for k, v in fields.items() if k in allowed}
         if fields:
             # column names are filtered through the allow-list above, values are bound parameters
@@ -428,6 +430,16 @@ class DB:
     def pending_lowsignup(self, now):
         """Upcoming events whose low-signup check hasn't run. Caller applies the setting."""
         return self._all("SELECT * FROM events WHERE low_alerted=0 AND message_id!=0 AND start_ts>?", (now,))
+
+    def sched_candidates(self, now, since):
+        """Raids whose Discord Scheduled Event may need creating, updating, starting or ending: posted upcoming raids
+        without one yet, and raids that started after `since` and still have one. Caller applies the setting."""
+        return self._all("SELECT * FROM events WHERE (sched_event_id=0 AND message_id!=0 AND start_ts>?) "
+                         "OR (sched_event_id>0 AND start_ts>?)", (now, since))
+
+    def sched_events_of(self, guild_id):
+        """This server's raids that still have a Discord Scheduled Event."""
+        return self._all("SELECT * FROM events WHERE guild_id=? AND sched_event_id>0", (guild_id,))
 
     def pending_autoclose(self, now):
         """Upcoming, still-open events whose automatic sign-up closing hasn't run. Caller applies the setting."""

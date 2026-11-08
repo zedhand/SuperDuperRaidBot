@@ -1,5 +1,5 @@
-"""Offline tests for v1.13/v1.14: the WoW version presets, and confirm/undo for /raid cancel and /raid remove
-(more suites are added below as features land).
+"""Offline tests for v1.13/v1.14: the WoW version presets, confirm/undo for /raid cancel and /raid remove, /forgetme,
+the daily backup post and realms on characters (more suites are added below as features land).
 
 Run:  python -I tests/test_v113.py        (or python tests/run_all.py for every suite)
 """
@@ -466,6 +466,125 @@ run(B.config_backupchannel.callback(i, None))
 check("leaving the channel empty turns it off", db.setting(G, "backup_channel") is None and "No more daily backup posts" in text(i))
 run(B._run_backuppost(int((day0 + timedelta(days=11, hours=6, minutes=1)).timestamp())))
 check("and nothing more is posted", len(CH[21].sent) == 10)
+
+# ------------------------------------------------------------ realm on characters
+print("realm on characters")
+old_path = tmp / "before-realms.db"
+con = sqlite3.connect(old_path)  # a database from before realms existed
+con.executescript(dbmod.SCHEMA)  # SCHEMA has no realm column; it comes from MIGRATIONS
+con.execute("INSERT INTO characters(user_id,name,wow_class,spec,role,is_main) VALUES(5,'Oldtimer','Warrior','Arms','dps',1)")
+con.commit()
+con.close()
+old = dbmod.DB(str(old_path))
+check("an older database gains the realm column and its characters keep working with no realm",
+      old.characters(5)[0]["name"] == "Oldtimer" and old.characters(5)[0]["realm"] == "", dict(old.characters(5)[0]))
+old.conn.close()
+check("a realm is tidied, and markdown or a mention can't get in",
+      dbmod.clean_realm("  Area   52 ") == "Area 52" and dbmod.clean_realm("Kel'Thuzad") == "Kel'Thuzad"
+      and dbmod.clean_realm("Azjol-Nerub") == "Azjol-Nerub" and dbmod.clean_realm("**@everyone**") == "everyone"
+      and dbmod.clean_realm("Pozzo dell'Eternità") == "Pozzo dell'Eternità" and len(dbmod.clean_realm("x" * 99)) == dbmod.REALM_MAX
+      and dbmod.clean_realm(None) == "")
+
+R1 = member(300)
+i = inter(R1)
+run(B.character_add.callback(i, "Sylvia", "Hunter", "Marksmanship", False, "Area 52"))
+check("/character add saves a realm", db.character_by_name(300, "Sylvia")["realm"] == "Area 52" and "on Area 52" in text(i), text(i))
+i = inter(R1)
+run(B.character_add.callback(i, "Sylvia", "Hunter", "Survival"))
+check("changing the spec without a realm keeps the saved realm",
+      db.character_by_name(300, "Sylvia")["realm"] == "Area 52" and db.character_by_name(300, "Sylvia")["spec"] == "Survival")
+i = inter(R1)
+run(B.character_add.callback(i, "Nora", "Priest", "Holy"))
+check("a realm stays optional", db.character_by_name(300, "Nora")["realm"] == "" and "on " not in text(i), text(i))
+i = inter(R1)
+run(B.character_add.callback(i, "Nora", "Priest", "Holy", False, "<<>>"))
+check("a realm that is only symbols is refused", db.character_by_name(300, "Nora")["realm"] == "" and "realm name" in text(i), text(i))
+i = inter(R1)
+run(B.character_list.callback(i))
+check("/character list shows the realm", "**Sylvia** · Area 52" in text(i) and "**Nora** —" in text(i), text(i))
+i = inter(R1)
+run(B.character_realm.callback(i, "nora", "Stormrage"))
+check("/character realm sets it on an existing character", db.character_by_name(300, "Nora")["realm"] == "Stormrage"
+      and "now on **Stormrage**" in text(i), text(i))
+i = inter(R1)
+run(B.character_realm.callback(i, "Nora", None))
+check("/character realm with no realm clears it", db.character_by_name(300, "Nora")["realm"] == "" and "Cleared" in text(i))
+i = inter(R1)
+run(B.character_realm.callback(i, "Nobody", "Stormrage"))
+check("/character realm on a character you don't have says so", "not found" in text(i))
+labels = [c.name for c in run(B.own_char_autocomplete(inter(R1), ""))]
+check("menus show the realm next to the name", "Sylvia-Area 52 (Survival Hunter)" in labels and "Nora (Holy Priest)" in labels, labels)
+menu = B.CharacterSelect(1, db.characters(300))
+check("the sign-up menu shows it too", any("Area 52" in (o.description or "") for o in menu.options))
+
+print("realms on the raid post (/config realms)")
+eid = db.create_event(G, 11, "Realm raid", "", int(time.time()) + 86400, 300, 0, 0, 0)
+db.set_signup(eid, 300, "Sylvia", "Hunter", "Survival", "dps", "in", None)
+db.set_signup(eid, 301, "Walkin", "Mage", "Fire", "dps", "tentative", None)  # no saved character
+db.upsert_character(302, "Benchy", "Rogue", "Subtlety", "dps", True, "Draenor")
+db.set_signup(eid, 302, "Benchy", "Rogue", "Subtlety", "dps", "bench", None)
+
+
+def post_text(e):
+    emb = B.render_embed(db.event(e), db.signups(e), False)
+    return " ".join(f.value for f in emb.fields)
+
+
+check("off by default: the post shows names only", db.setting(G, "show_realms") is None
+      and "Area 52" not in post_text(eid) and "**Sylvia**" in post_text(eid))
+i = inter(officer)
+run(B.config_realms.callback(i, True))
+check("/config realms on", db.setting(G, "show_realms") == "1" and "/character realm" in text(i), text(i))
+check("the post shows realms in the role columns and on the bench line",
+      "**Sylvia** (Area 52)" in post_text(eid) and "**Benchy** (Draenor)" in post_text(eid), post_text(eid))
+check("someone without a saved realm shows as before", "**Walkin**" in post_text(eid) and "**Walkin** (" not in post_text(eid))
+db.set_realm(300, db.character_by_name(300, "Sylvia")["id"], "Silvermoon")
+check("changing a saved realm updates the post", "**Sylvia** (Silvermoon)" in post_text(eid), post_text(eid))
+check("realms_for ignores signups without a character", 301 not in db.realms_for(db.signups(eid)))
+i = inter(officer)
+run(B.config_show.callback(i))
+check("/config show lists it", "Realms on raid posts:** on" in text(i), text(i))
+i = inter(officer)
+run(B.config_realms.callback(i, False))
+check("/config realms off hides them again and keeps the saved realms",
+      "Silvermoon" not in post_text(eid) and db.character_by_name(300, "Sylvia")["realm"] == "Silvermoon")
+
+print("/character import keeps the realm")
+real_lookup2, real_preset = B.raiderio_lookup, wd.PRESET_NAME
+wd.PRESET_NAME = "retail"
+db.set_setting(G, "raiderio", "1")
+
+
+class FollowUp:
+    def __init__(self): self.sent = []
+    async def send(self, *a, **k): self.sent.append((a, k))
+
+
+async def fake_rio(region, realm, name):
+    return {"name": "Imported", "class": "Druid", "spec": "Balance", "realm": "Area 52", "ilvl": None, "url": None}
+B.raiderio_lookup = fake_rio
+i = inter(R1)
+i.response.defer = lambda **k: asyncio.sleep(0)
+i.followup = FollowUp()
+run(B.character_import.callback(i, "imported", "area-52"))
+check("the realm Raider.IO names is saved", db.character_by_name(300, "Imported")["realm"] == "Area 52"
+      and "on Area 52" in i.followup.sent[0][0][0], i.followup.sent)
+B.raiderio_lookup, wd.PRESET_NAME = real_lookup2, real_preset
+
+print("realms and the daily backup copy / forgetme")
+db.upsert_character(880, "Stranger", "Rogue", "Subtlety", "dps", True, "Secretrealm")
+db.set_signup(mine, 300, "Sylvia", "Hunter", "Survival", "dps", "in", None)
+out = tmp / "realm-copy.db"
+db.snapshot_for_guild(str(out), G)
+con = sqlite3.connect(out)
+check("this server's copy keeps its players' realms", con.execute("SELECT realm FROM characters WHERE user_id=300 AND name='Sylvia'").fetchone() == ("Silvermoon",))
+con.close()
+check("and has no other server's player's realm in the file", b"Secretrealm" not in out.read_bytes())
+i = inter(R1)
+run(B.forgetme.callback(i))
+press(i, "Yes, delete", user=R1)
+check("/forgetme deletes characters with their realms", db.characters(300) == []
+      and db._one("SELECT COUNT(*) c FROM characters WHERE realm='Silvermoon'")["c"] == 0)
 
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

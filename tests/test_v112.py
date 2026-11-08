@@ -199,7 +199,7 @@ def lookup(payload):
 
 
 got = lookup(SAMPLE)
-check("class, spec, item level and link come back", got == {"name": "Thrall", "class": "Shaman", "spec": "Enhancement", "ilvl": 639,
+check("class, spec, item level and link come back", got == {"name": "Thrall", "class": "Shaman", "spec": "Enhancement", "realm": "", "ilvl": 639,
                                                             "url": "https://raider.io/characters/us/area-52/Thrall"}, got)
 check("a spec we don't know gives spec None (we ask the player)", lookup({**SAMPLE, "active_spec_name": "Banana"})["spec"] is None)
 check("a link to some other site is dropped", lookup({**SAMPLE, "profile_url": "https://evil.example/x"})["url"] is None)
@@ -510,7 +510,7 @@ press(view, "Back")
 print("/config setup: extras")
 press(view, "Extras")
 toggles = [c.label for c in view.children]
-check("six switches and Back on retail (Confirm deletes since v1.13)", len(toggles) == 7 and toggles[-1] == "Back" and "Raider.IO import: " in " ".join(toggles) and "Confirm deletes: off" in toggles, toggles)
+check("seven switches and Back on retail (Confirm deletes and Realms on posts since v1.13)", len(toggles) == 8 and toggles[-1] == "Back" and "Raider.IO import: " in " ".join(toggles) and "Confirm deletes: off" in toggles and "Realms on posts: off" in toggles, toggles)
 before = db.setting(G, "threads")
 press(view, "Discussion threads: off")
 check("a switch flips the setting", db.setting(G, "threads") == "1")

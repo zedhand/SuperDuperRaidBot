@@ -101,7 +101,23 @@ MIGRATIONS = (
     ("events", "voice_checked", "INTEGER NOT NULL DEFAULT 0"),  # v1.11: the voice-channel attendance check has run
     ("events", "class_caps", "TEXT NOT NULL DEFAULT ''"),     # v1.11: per-class limits, e.g. "Mage:4,Warlock:2"
     ("templates", "class_caps", "TEXT NOT NULL DEFAULT ''"),  # v1.11
+    ("characters", "realm", "TEXT NOT NULL DEFAULT ''"),      # v1.13: optional realm, '' = not set
 )
+
+
+REALM_MAX = 40
+
+
+def clean_realm(text: str | None) -> str:
+    """A realm as typed -> what is stored: only letters, digits, spaces, ' and - (every WoW realm name fits, and
+    nothing can turn into Discord formatting or a mention), spaces tidied, at most REALM_MAX characters, '' for none."""
+    kept = "".join(c for c in (text or "") if c.isalnum() or c in " '-")
+    return " ".join(kept.split())[:REALM_MAX].strip()
+
+
+def with_realm(name: str, realm: str | None) -> str:
+    """'Thrall' + 'Area 52' -> 'Thrall (Area 52)'; without a realm just the name."""
+    return f"{name} ({realm})" if realm else name
 
 
 def caps_dict(text: str | None) -> dict[str, int]:
@@ -200,17 +216,18 @@ class DB:
     def main_character(self, user_id):
         return self._one("SELECT * FROM characters WHERE user_id=? ORDER BY is_main DESC, id LIMIT 1", (user_id,))
 
-    def upsert_character(self, user_id, name, wow_class, spec, role, make_main):
+    def upsert_character(self, user_id, name, wow_class, spec, role, make_main, realm=None):
+        """Add or update a character. realm=None keeps an existing character's realm; a string sets it."""
         has_any = self._one("SELECT 1 FROM characters WHERE user_id=?", (user_id,)) is not None
         existing = self.character_by_name(user_id, name)
         if existing:
-            self._run("UPDATE characters SET wow_class=?, spec=?, role=? WHERE id=?",
-                      (wow_class, spec, role, existing["id"]))
+            self._run("UPDATE characters SET wow_class=?, spec=?, role=?, realm=? WHERE id=?",
+                      (wow_class, spec, role, existing["realm"] if realm is None else clean_realm(realm), existing["id"]))
             char_id = existing["id"]
         else:
             char_id = self._run(
-                "INSERT INTO characters(user_id,name,wow_class,spec,role,is_main) VALUES(?,?,?,?,?,0)",
-                (user_id, name, wow_class, spec, role)).lastrowid
+                "INSERT INTO characters(user_id,name,wow_class,spec,role,is_main,realm) VALUES(?,?,?,?,?,0,?)",
+                (user_id, name, wow_class, spec, role, clean_realm(realm))).lastrowid
         if make_main or not has_any:
             self.set_main(user_id, char_id)
         return char_id
@@ -218,6 +235,22 @@ class DB:
     def set_main(self, user_id, char_id):
         self._run("UPDATE characters SET is_main=0 WHERE user_id=?", (user_id,))
         self._run("UPDATE characters SET is_main=1 WHERE id=? AND user_id=?", (char_id, user_id))
+
+    def set_realm(self, user_id, char_id, realm):
+        self._run("UPDATE characters SET realm=? WHERE id=? AND user_id=?", (clean_realm(realm), char_id, user_id))
+
+    def realms_for(self, signups) -> dict:
+        """{user_id: realm} for the signups whose character is saved with a realm (for the raid post).
+        The realm comes from the saved character, so changing it there updates every post."""
+        users = {s["user_id"] for s in signups if s["char_name"]}
+        if not users:
+            return {}
+        marks = ",".join("?" * len(users))
+        rows = self._all(f"SELECT user_id, name, realm FROM characters WHERE realm != '' AND user_id IN ({marks})",  # nosec B608
+                         tuple(users))
+        realm = {(r["user_id"], r["name"].lower()): r["realm"] for r in rows}
+        return {s["user_id"]: realm[(s["user_id"], s["char_name"].lower())] for s in signups
+                if s["char_name"] and (s["user_id"], s["char_name"].lower()) in realm}
 
     def delete_character(self, user_id, char_id):
         self._run("DELETE FROM characters WHERE id=? AND user_id=?", (char_id, user_id))

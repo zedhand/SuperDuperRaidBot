@@ -21,7 +21,7 @@ Everything below is optional and off by default unless noted. One release (v1.14
 ### v1.14 "convenience"
 | # | Feature | Why | Effort | Status |
 |---|---|---|---|---|
-| 6 | Realm stored with characters (Raider.IO import fills it) | Needed for invite names | M | Planned |
+| 6 | Realm stored with characters (Raider.IO import fills it), optional on raid posts (`/config realms`) | Needed for invite names | M | Done (on the v1.13 branch) |
 | 7 | Short note on a signup, shown on the post and roster | Very common request | S | Planned |
 | 8 | Switch spec from the post without redoing signup | Respeccing is routine | M | Planned |
 | 9 | `/raid promote`: pull a specific benched player in | Bench promotion is strictly first-come today | S | Planned |

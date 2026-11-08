@@ -48,9 +48,11 @@ def _clip(text: str, limit: int = 1024) -> str:
     return (cut[:at] if at > 0 else cut) + "…"
 
 
-def _oneline(icon: str, label: str, rows, num, limit: int = 1024) -> str:
+def _oneline(icon: str, label: str, rows, num, limit: int = 1024, suffix=None) -> str:
+    suffix = suffix or {}
     names = ", ".join(
-        f"`{num[s['user_id']]}` **{s['char_name']}**" if s["char_name"] else f"`{num[s['user_id']]}` <@{s['user_id']}>"
+        (f"`{num[s['user_id']]}` **{s['char_name']}**" if s["char_name"] else f"`{num[s['user_id']]}` <@{s['user_id']}>")
+        + suffix.get(s["user_id"], "")
         for s in rows)
     return _clip(f"{icon} **{label} ({len(rows)})** : {names}", limit)
 
@@ -129,8 +131,15 @@ def _build(event, signups, locked: bool, limit: int) -> discord.Embed:
     for status, icon, label in (("bench", "🪑", "Bench"), ("late", "⏰", "Late"),
                                 ("tentative", "❔", "Tentative"), ("absent", "❌", "Absence")):
         rows = [s for s in signups if s["status"] == status]
+        queue = {}
+        if status == "bench":  # people the bot benched because a role was full: their place in line, per role
+            place: dict[str, int] = {}
+            for s in rows:
+                if s["bench_from"] and s["role"]:
+                    place[s["role"]] = place.get(s["role"], 0) + 1
+                    queue[s["user_id"]] = f" (#{place[s['role']]} {s['role']})"
         if rows:
-            embed.add_field(name=ZWS, value=_oneline(icon, label, rows, num, limit), inline=False)
+            embed.add_field(name=ZWS, value=_oneline(icon, label, rows, num, limit, queue), inline=False)
 
     footer = f"Event #{event['id']}"
     if event["cap_dps"]:

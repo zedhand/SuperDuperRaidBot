@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.10.0
+"Faster for players".
+- **One-click sign-up.** Press **Sign Up** and the top button signs you up as the character you used last time (your main the first time). The prompt also tells you your current status. Choosing another character or class still works the same way.
+- **📅 Calendar button** on every raid post: sends a private `.ics` file for Google, Apple or Outlook calendar. The entry has the raid's title, description and a link back to the post, and opening the file again after the raid moves updates the same entry.
+- **`/remindme`:** get raid reminders as a private message instead of a ping in the channel. If your private messages from the server are closed, you are pinged in the channel as before. Off by default.
+- **`/always join | leave | list`:** sign up once to a repeating raid and be signed up to every new occurrence as it is posted (with the character you chose; role limits and the bench still apply, and you can still press Absent on any date). It also works for repeating raids that were already running.
+- **Your place in line on the bench.** When a role is full and you are benched, the bot tells you your place ("#2 in line for a tank slot"), and the bench list on the post shows it, e.g. `(#2 tank)`.
+- Fixed wording: when DPS slots were full the messages said "DP slots"; they now say "DPS slots".
+- Tests: new `tests/test_v110.py`.
+
 ## 1.9.0
 "Faster for officers".
 - **Type dates the way you'd say them.** `/raid create`, `/raid copy` and `/raid edit` now understand `thu 8pm`, `tomorrow 19:30`, `nov 14 8pm`, `+7d 20:00` and `next sun noon`, as well as the old `2026-11-14` with `20:00`. The date box also offers the next two weeks to pick from, and the time box is optional when the date includes a time. In `/raid edit` you can change just the day or just the time. Unclear input is refused with an example instead of guessed (a bare `8` could be morning or evening).

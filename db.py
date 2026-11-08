@@ -58,6 +58,16 @@ CREATE TABLE IF NOT EXISTS settings (
     value TEXT NOT NULL,
     PRIMARY KEY (guild_id, key)
 );
+CREATE TABLE IF NOT EXISTS series_signups (
+    guild_id INTEGER NOT NULL,
+    series_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    char_name TEXT NOT NULL,
+    wow_class TEXT NOT NULL,
+    spec TEXT NOT NULL,
+    role TEXT NOT NULL,
+    PRIMARY KEY (series_id, user_id)
+);
 """
 
 # Columns added after v1.0: (table, column, definition). Each is added only if it is missing, so a real
@@ -72,6 +82,7 @@ MIGRATIONS = (
     ("events", "nudged", "INTEGER NOT NULL DEFAULT 0"),       # v1.8: "who hasn't answered" ping sent
     ("signups", "no_show", "INTEGER NOT NULL DEFAULT 0"),     # v1.8: signed up but didn't turn up
     ("events", "autoclosed", "INTEGER NOT NULL DEFAULT 0"),   # v1.9: the automatic sign-up closing has run
+    ("events", "series_id", "INTEGER NOT NULL DEFAULT 0"),    # v1.10: which repeating series a raid belongs to
 )
 
 
@@ -203,7 +214,7 @@ class DB:
 
     def update_event(self, event_id, **fields):
         allowed = {"title", "description", "start_ts", "cap_tank", "cap_healer", "cap_dps", "reminded",
-                   "lock_shown", "repeat_days", "repeated", "thread_id", "archived", "nudged", "autoclosed"}
+                   "lock_shown", "repeat_days", "repeated", "thread_id", "archived", "nudged", "autoclosed", "series_id"}
         fields = {k: v for k, v in fields.items() if k in allowed}
         if fields:
             # column names are filtered through the allow-list above, values are bound parameters
@@ -289,6 +300,46 @@ class DB:
 
     def remove_signup(self, event_id, user_id):
         self._run("DELETE FROM signups WHERE event_id=? AND user_id=?", (event_id, user_id))
+
+    def last_character_used(self, user_id):
+        """The character this person most recently signed up with (any raid), or None."""
+        return self._one("SELECT char_name, wow_class, spec, role FROM signups WHERE user_id=? AND char_name IS NOT NULL "
+                         "AND role IS NOT NULL ORDER BY updated_ts DESC, rowid DESC LIMIT 1", (user_id,))
+
+    def bench_position(self, event_id, user_id):
+        """1-based place in line for a slot of their role among people the bot benched (first come, first
+        served), or None if they aren't waiting for a slot."""
+        me = self.signup(event_id, user_id)
+        if not me or me["status"] != "bench" or not me["bench_from"] or not me["role"]:
+            return None
+        line = [s["user_id"] for s in self.signups(event_id)
+                if s["status"] == "bench" and s["bench_from"] and s["role"] == me["role"]]
+        return line.index(user_id) + 1
+
+    # ---- repeating-raid series ("always in") ----
+    def join_series(self, guild_id, series_id, user_id, char_name, wow_class, spec, role):
+        self._run("INSERT INTO series_signups(guild_id,series_id,user_id,char_name,wow_class,spec,role) "
+                  "VALUES(?,?,?,?,?,?,?) ON CONFLICT(series_id,user_id) DO UPDATE SET char_name=excluded.char_name, "
+                  "wow_class=excluded.wow_class, spec=excluded.spec, role=excluded.role",
+                  (guild_id, series_id, user_id, char_name, wow_class, spec, role))
+
+    def leave_series(self, series_id, user_id):
+        return self._run("DELETE FROM series_signups WHERE series_id=? AND user_id=?", (series_id, user_id)).rowcount > 0
+
+    def series_members(self, series_id):
+        return self._all("SELECT * FROM series_signups WHERE series_id=? ORDER BY rowid", (series_id,))
+
+    def user_series(self, guild_id, user_id):
+        return self._all("SELECT * FROM series_signups WHERE guild_id=? AND user_id=? ORDER BY series_id",
+                         (guild_id, user_id))
+
+    def latest_in_series(self, series_id):
+        return self._one("SELECT * FROM events WHERE series_id=? OR id=? ORDER BY start_ts DESC LIMIT 1",
+                         (series_id, series_id))
+
+    def upcoming_recurring(self, guild_id, since_ts):
+        return self._all("SELECT * FROM events WHERE guild_id=? AND repeat_days>0 AND start_ts>=? AND message_id!=0 "
+                         "ORDER BY start_ts", (guild_id, since_ts))
 
     # ---- templates ----
     def template(self, guild_id, name):

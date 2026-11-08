@@ -11,7 +11,7 @@ import time
 from datetime import date as Date
 from datetime import datetime
 from datetime import time as Clock
-from datetime import timedelta
+from datetime import timedelta, timezone
 from functools import partial
 from pathlib import Path
 from typing import Optional, Union
@@ -22,7 +22,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
-VERSION = "1.9.0"
+VERSION = "1.10.0"
 WINDOWS = os.name == "nt"  # only used to word messages for the person reading them
 BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / ".env"  # always the .env next to bot.py, whatever folder you launch from
@@ -177,6 +177,13 @@ def autoclose_inside(guild_id: int, start_ts: int) -> bool:
     return bool(hours and start_ts - hours * 3600 <= time.time())
 
 
+def queue_note(event_id: int, user_id: int) -> str:
+    """' You're #2 in line for a tank slot.' for someone the bot benched because a role was full, else ''."""
+    pos = db.bench_position(event_id, user_id)
+    role = (db.signup(event_id, user_id) or {"role": None})["role"]
+    return f" You're #{pos} in line for a {wd.ROLE_SINGULAR[role].lower()} slot." if pos and role else ""
+
+
 def apply_cap(event, user_id: int, role: str, status: str) -> tuple[str, str | None]:
     """Counted statuses ('in', 'late') overflow to the bench when their role is full.
 
@@ -201,7 +208,7 @@ async def promote_bench(event_id: int) -> None:
         if cap and db.count_role(event_id, s["role"], s["user_id"]) >= cap:
             continue
         db.set_signup(event_id, s["user_id"], s["char_name"], s["wow_class"], s["spec"], s["role"], s["bench_from"])
-        text = f"🎉 A {wd.ROLE_LABEL[s['role']].rstrip('s').lower()} slot opened up. You're off the bench for **{event['title']}**!"
+        text = f"🎉 A {wd.ROLE_SINGULAR[s['role']].lower()} slot opened up. You're off the bench for **{event['title']}**!"
         try:
             await (await bot.fetch_user(s["user_id"])).send(text)
         except discord.HTTPException:  # DMs closed: mention them in the raid channel instead
@@ -314,9 +321,10 @@ async def finish_signup(interaction: discord.Interaction, event_id: int, name: s
         return await interaction.response.edit_message(content="Signups are closed.", view=None)
     status, bench_from = apply_cap(event, interaction.user.id, role, "in")
     db.set_signup(event_id, interaction.user.id, name, cls, spec, role, status, bench_from)
-    note = "" if status == "in" else f" ({wd.ROLE_LABEL[role].rstrip('s')} slots are full, so you were put on the bench)"
+    note = "" if status == "in" else f" ({wd.ROLE_SINGULAR[role]} slots are full, so you were put on the bench)"
     await interaction.response.edit_message(
-        content=f"Signed up as **{name}** — {spec} {cls} ({wd.ROLE_LABEL[role]}){note}.", view=None)
+        content=f"Signed up as **{name}** — {spec} {cls} ({wd.ROLE_LABEL[role]}){note}.{queue_note(event_id, interaction.user.id)}",
+        view=None)
     await update_event(event_id)
 
 
@@ -352,11 +360,37 @@ class SpecPickView(discord.ui.View):
         self.add_item(SpecSelect(event_id, cls))
 
 
-class CharacterPickView(discord.ui.View):
-    """Saved characters (if any) plus a class picker for signing up without one."""
+class QuickSignupButton(discord.ui.Button):
+    """One click: sign up as the character this person used last time (or their main)."""
 
-    def __init__(self, event_id: int, chars):
+    def __init__(self, event_id: int, c: dict):
+        self.event_id, self.c = event_id, c
+        super().__init__(label=f"Sign up as {c['name']} ({c['spec']} {c['wow_class']})"[:80],
+                         style=discord.ButtonStyle.success, emoji="⚡")
+
+    async def callback(self, interaction: discord.Interaction):
+        c = self.c
+        await finish_signup(interaction, self.event_id, c["name"], c["wow_class"], c["spec"], c["role"])
+
+
+def quick_character(user_id: int) -> dict | None:
+    """Who a one-click sign-up should use: the character they signed up with last, else their main."""
+    last = db.last_character_used(user_id)
+    if last:
+        return {"name": last["char_name"], "wow_class": last["wow_class"], "spec": last["spec"], "role": last["role"]}
+    main = db.main_character(user_id)
+    if main:
+        return {"name": main["name"], "wow_class": main["wow_class"], "spec": main["spec"], "role": main["role"]}
+    return None
+
+
+class CharacterPickView(discord.ui.View):
+    """A one-click button for the usual character, saved characters (if any), and a class picker."""
+
+    def __init__(self, event_id: int, chars, quick: dict | None = None):
         super().__init__(timeout=120)
+        if quick:
+            self.add_item(QuickSignupButton(event_id, quick))
         if chars:
             self.add_item(CharacterSelect(event_id, chars))
         self.add_item(ClassSelect(event_id))
@@ -414,7 +448,8 @@ class RaidView(discord.ui.View):
             status, bench_from = apply_cap(event, uid, row["role"], status)
             db.set_signup(event["id"], uid, row["char_name"], row["wow_class"], row["spec"],
                           row["role"], status, bench_from)
-        await interaction.response.send_message(f"You are now marked as **{status}**.", ephemeral=True)
+        await interaction.response.send_message(
+            f"You are now marked as **{status}**.{queue_note(event['id'], uid)}", ephemeral=True)
         await update_event(event["id"])
 
     @discord.ui.button(label="Sign Up", style=discord.ButtonStyle.success, custom_id="raid:signup")
@@ -423,9 +458,16 @@ class RaidView(discord.ui.View):
         if not event:
             return
         chars = db.characters(interaction.user.id)
+        quick = quick_character(interaction.user.id)
         prompt = ("Pick a saved character, or choose a class to sign up without one:" if chars else
                   "Choose your class to sign up. (Tip: save characters with `/character add` to skip this next time.)")
-        await interaction.response.send_message(prompt, view=CharacterPickView(event["id"], chars),
+        if quick:
+            prompt = "One click with the button below, or pick someone else:"
+        current = db.signup(event["id"], interaction.user.id)
+        if current:
+            who = f" as **{current['char_name']}**" if current["char_name"] else ""
+            prompt = f"You're currently **{current['status']}**{who}. " + prompt
+        await interaction.response.send_message(prompt, view=CharacterPickView(event["id"], chars, quick),
                                                 ephemeral=True)
 
     @discord.ui.button(label="Late", style=discord.ButtonStyle.primary, custom_id="raid:late")
@@ -443,6 +485,54 @@ class RaidView(discord.ui.View):
     @discord.ui.button(label="Absent", style=discord.ButtonStyle.danger, custom_id="raid:absent")
     async def absent(self, interaction: discord.Interaction, _: discord.ui.Button):
         await self._status(interaction, "absent")
+
+    @discord.ui.button(label="Calendar", emoji="📅", style=discord.ButtonStyle.secondary, custom_id="raid:ics")
+    async def calendar(self, interaction: discord.Interaction, _: discord.ui.Button):
+        event = db.event_by_message(interaction.message.id)
+        if not event:
+            return await interaction.response.send_message("This event no longer exists.", ephemeral=True)
+        data = build_ics(event, interaction.message.jump_url).encode("utf-8")
+        await interaction.response.send_message(
+            "Open this file to add the raid to your calendar (Google, Apple, Outlook). It is in your own timezone.",
+            file=discord.File(io.BytesIO(data), filename=f"raid-{event['id']}.ics"), ephemeral=True)
+
+
+# ---------------------------------------------------------------- add to calendar (.ics)
+RAID_HOURS = 3  # raids have no end time; calendars show this long
+
+
+def _ics_escape(text: str) -> str:
+    return (text.replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,")
+            .replace("\r\n", "\\n").replace("\n", "\\n"))
+
+
+def _ics_fold(line: str) -> str:
+    """Calendar files may not have lines over 75 bytes: continue on the next line after a space."""
+    parts, cur, limit = [], "", 75
+    for ch in line:
+        if len((cur + ch).encode("utf-8")) > limit:
+            parts.append(cur)
+            cur, limit = ch, 74
+        else:
+            cur += ch
+    parts.append(cur)
+    return "\r\n ".join(parts)
+
+
+def build_ics(event, url: str, now: int | None = None) -> str:
+    """An iCalendar file for one raid. The UID is stable, so re-opening it after the raid moves updates the
+    calendar entry instead of adding a second one."""
+    stamp = "%Y%m%dT%H%M%SZ"
+    start = datetime.fromtimestamp(event["start_ts"], timezone.utc)
+    end = start + timedelta(hours=RAID_HOURS)
+    made = datetime.fromtimestamp(now if now is not None else time.time(), timezone.utc)
+    description = (event["description"] + "\n" if event["description"] else "") + url
+    lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//SuperDuperRaidBot//Raid//EN", "CALSCALE:GREGORIAN",
+             "METHOD:PUBLISH", "BEGIN:VEVENT", f"UID:raid-{event['id']}@superduperraidbot",
+             f"DTSTAMP:{made.strftime(stamp)}", f"DTSTART:{start.strftime(stamp)}", f"DTEND:{end.strftime(stamp)}",
+             f"SUMMARY:{_ics_escape(event['title'])}", f"DESCRIPTION:{_ics_escape(description)}", f"URL:{url}",
+             "END:VEVENT", "END:VCALENDAR"]
+    return "\r\n".join(_ics_fold(x) for x in lines) + "\r\n"
 
 
 # ---------------------------------------------------------------- /character
@@ -733,11 +823,13 @@ def threads_default(guild_id: int) -> bool:
 
 async def post_event(channel, guild, creator_id: int, title: str, description: str, ts: int,
                      tanks: int, healers: int, dps: int, ping=None, repeat_days: int = 0,
-                     thread: bool = False):
+                     thread: bool = False, series_id: int = 0):
     """Create the event row and its post. Returns (event_id, message, notes). Raises HTTPException
     (and leaves nothing behind) if the post itself can't be sent."""
     event_id = db.create_event(guild.id, channel.id, title, description, ts, creator_id,
                                tanks, healers, dps, repeat_days)
+    if series_id or repeat_days:  # a repeating raid starts a series; each next one carries the same series id
+        db.update_event(event_id, series_id=series_id or event_id)
     event = db.event(event_id)
     if ping and ping.is_default():
         mentions = discord.AllowedMentions(everyone=True)
@@ -900,9 +992,23 @@ async def raid_repeat(interaction: discord.Interaction, event_id: int, every: ap
             "That raid has already posted its next one. Change the repeat on the upcoming raid instead.",
             ephemeral=True)
     db.update_event(event_id, repeat_days=every.value)
+    if every.value and not event["series_id"]:
+        db.update_event(event_id, series_id=event_id)
     await interaction.response.send_message(
         f"Event #{event_id} will repeat {every.name.lower()}: the next one is posted when this one starts."
         if every.value else f"Event #{event_id} will no longer repeat.", ephemeral=True)
+    await refresh_message(event_id)
+
+
+async def seed_series(event_id: int, series_id: int) -> None:
+    """Sign everyone who joined this series with /always join up to a freshly posted occurrence."""
+    members = db.series_members(series_id)
+    if not members:
+        return
+    event = db.event(event_id)
+    for m in members:
+        status, bench_from = apply_cap(event, m["user_id"], m["role"], "in")
+        db.set_signup(event_id, m["user_id"], m["char_name"], m["wow_class"], m["spec"], m["role"], status, bench_from)
     await refresh_message(event_id)
 
 
@@ -926,12 +1032,19 @@ async def spawn_next(event) -> bool:
             log.warning("Recurring raid #%s: couldn't reach its channel (%s), will retry", event["id"], e)
             return False
     role_id = default_ping_role_id(event["guild_id"], channel)
+    series = event["series_id"] or event["id"]
     try:
-        await post_event(channel, channel.guild, event["creator_id"], event["title"], event["description"],
-                         int(nxt.timestamp()), event["cap_tank"], event["cap_healer"], event["cap_dps"],
-                         ping=channel.guild.get_role(role_id) if role_id else None,
-                         repeat_days=event["repeat_days"], thread=threads_default(event["guild_id"]))
+        new_id, _msg, _notes = await post_event(
+            channel, channel.guild, event["creator_id"], event["title"], event["description"],
+            int(nxt.timestamp()), event["cap_tank"], event["cap_healer"], event["cap_dps"],
+            ping=channel.guild.get_role(role_id) if role_id else None,
+            repeat_days=event["repeat_days"], thread=threads_default(event["guild_id"]), series_id=series)
         log.info("Posted the next occurrence of recurring raid #%s", event["id"])
+        try:
+            await seed_series(new_id, series)
+        except Exception as err:  # the raid is posted: never report failure (a retry would post it twice)
+            log.exception("Couldn't sign up the 'always in' members for raid #%s", new_id)
+            note_error(f"'always in' sign-ups for raid #{new_id}: {err!r}")
     except discord.HTTPException as e:
         log.warning("Couldn't post the next occurrence of raid #%s: %s", event["id"], e)
         note_error(f"couldn't post the next occurrence of raid #{event['id']}: {e}")
@@ -1142,7 +1255,7 @@ async def raid_add(interaction: discord.Interaction, event_id: int, member: disc
         db.set_signup(event_id, member.id, row["char_name"], row["wow_class"], row["spec"], row["role"], final, bench_from)
         text = f"{member.mention} is now **{final}** for **{event['title']}** as **{row['char_name']}** — {row['spec']} {row['wow_class']}."
         if final != st:
-            text += f" ({wd.ROLE_LABEL[row['role']].rstrip('s')} slots are full, so they went on the bench.)"
+            text += f" ({wd.ROLE_SINGULAR[row['role']]} slots are full, so they went on the bench.)"
     await audit(interaction.guild_id, f"➕ {interaction.user.mention} set {member.mention} to {final} for **{event['title']}** (#{event_id})")
     await interaction.response.send_message(text, ephemeral=True, allowed_mentions=quiet)
     await update_event(event_id)
@@ -1288,21 +1401,43 @@ def mention_list(head: str, user_ids, limit: int = 2000) -> str:
     return out.rstrip()
 
 
+_dm_sent: set[tuple[int, int]] = set()  # (event, user) already sent a reminder DM, so a retry doesn't repeat it
+
+
+def wants_dm(guild_id: int, user_id: int) -> bool:
+    return db.setting(guild_id, f"dm_remind@{user_id}") == "1"
+
+
 async def _remind_one(event, now: int):
     if event["start_ts"] - guild_reminder_minutes(event["guild_id"]) * 60 > now:
         return WAIT
     users = [x["user_id"] for x in db.signups(event["id"]) if x["status"] in ("in", "late", "tentative")]
     if not users:
         return WAIT  # nobody to remind yet: keep the reminder for when the first person signs up
+    link = f"https://discord.com/channels/{event['guild_id']}/{event['channel_id']}/{event['message_id']}"
+    ping_users = []
+    for uid in users:
+        if not wants_dm(event["guild_id"], uid):
+            ping_users.append(uid)
+        elif (event["id"], uid) not in _dm_sent:
+            try:
+                await (await bot.fetch_user(uid)).send(f"⏰ **{event['title']}** starts <t:{event['start_ts']}:R>! {link}")
+                _dm_sent.add((event["id"], uid))
+            except discord.HTTPException:
+                ping_users.append(uid)  # their DMs are closed: ping them in the channel like everyone else
+    if len(_dm_sent) > 5000:
+        _dm_sent.clear()
+    if not ping_users:
+        return True
     channel = bot.get_channel(event["channel_id"])
     if channel is None:
         return True
     try:
-        await channel.send(mention_list(f"⏰ **{event['title']}** starts <t:{event['start_ts']}:R>! ", users),
+        await channel.send(mention_list(f"⏰ **{event['title']}** starts <t:{event['start_ts']}:R>! ", ping_users),
                            allowed_mentions=USERS_ONLY)
-    except discord.HTTPException as e:
-        log.warning("Reminder failed for event %s: %s", event["id"], e)
-        note_error(f"reminder for raid #{event['id']}: {e}")
+    except discord.HTTPException as err:
+        log.warning("Reminder failed for event %s: %s", event["id"], err)
+        note_error(f"reminder for raid #{event['id']}: {err}")
         return False
     return True
 
@@ -1487,6 +1622,113 @@ async def myraids(interaction: discord.Interaction):
              for r in rows[:15]]
     await interaction.response.send_message("\n".join(lines), ephemeral=True,
                                             allowed_mentions=discord.AllowedMentions.none())
+
+
+@bot.tree.command(name="remindme", description="Get raid reminders as a private message instead of a ping in the channel")
+@app_commands.describe(on="True: message me. False: ping me in the channel like everyone else")
+@app_commands.guild_only()
+async def remindme(interaction: discord.Interaction, on: bool):
+    db.set_setting(interaction.guild_id, f"dm_remind@{interaction.user.id}", "1" if on else None)
+    await interaction.response.send_message(
+        "Done. Before each raid you're signed up for I'll message you privately instead of pinging you in the channel. "
+        "(If your private messages from this server are closed I'll ping you in the channel as usual.)" if on else
+        "Done. You'll be pinged in the channel before raids, like everyone else.", ephemeral=True)
+
+
+always = app_commands.Group(name="always", description="Stay signed up to a repeating raid", guild_only=True)
+
+
+def repeat_label(days: int) -> str:
+    return {7: "every week", 14: "every 2 weeks"}.get(days, f"every {days} days")
+
+
+async def recurring_autocomplete(interaction: discord.Interaction, current: str):
+    """Upcoming repeating raids in this server, as '#channel · Title · Nov 14 20:00 (#id)'."""
+    tz = guild_tz(interaction.guild_id)
+    out = []
+    for e in db.upcoming_recurring(interaction.guild_id, int(time.time())):
+        ch = bot.get_channel(e["channel_id"])
+        when = datetime.fromtimestamp(e["start_ts"], tz).strftime("%b %d %H:%M")
+        label = f"#{ch.name if ch else 'deleted-channel'} · {e['title']} · {when} ({repeat_label(e['repeat_days'])})"
+        if current.lower() in label.lower():
+            out.append(app_commands.Choice(name=label[:100], value=e["id"]))
+    return out[:25]
+
+
+async def my_series_autocomplete(interaction: discord.Interaction, current: str):
+    out = []
+    for m in db.user_series(interaction.guild_id, interaction.user.id):
+        latest = db.latest_in_series(m["series_id"])
+        label = f"{latest['title'] if latest else 'a raid that no longer exists'} ({m['char_name']})"
+        if current.lower() in label.lower():
+            out.append(app_commands.Choice(name=label[:100], value=m["series_id"]))
+    return out[:25]
+
+
+@always.command(name="join", description="Sign up to a repeating raid now, and to every future one automatically")
+@app_commands.describe(event_id="A repeating raid", character="Which character (default: your last one, else your main)")
+@app_commands.autocomplete(event_id=recurring_autocomplete, character=own_char_autocomplete)
+async def always_join(interaction: discord.Interaction, event_id: int, character: Optional[str] = None):
+    event = db.event(event_id)
+    if not event or event["guild_id"] != interaction.guild_id or not event["repeat_days"]:
+        return await interaction.response.send_message(
+            "That isn't a repeating raid. Pick one from the list.", ephemeral=True)
+    if not may_sign_up(interaction):
+        return await interaction.response.send_message(
+            f"Sign-ups here are for members with <@&{int_setting(interaction.guild_id, 'raider_role')}>.",
+            ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+    uid = interaction.user.id
+    existing = db.signup(event_id, uid)
+    if character:
+        c = db.character_by_name(uid, character)
+        who = {"name": c["name"], "wow_class": c["wow_class"], "spec": c["spec"], "role": c["role"]} if c else None
+        if who is None:
+            return await interaction.response.send_message("You don't have a saved character with that name.", ephemeral=True)
+    elif existing and existing["char_name"]:
+        who = {"name": existing["char_name"], "wow_class": existing["wow_class"], "spec": existing["spec"],
+               "role": existing["role"]}
+    else:
+        who = quick_character(uid)
+    if who is None:
+        return await interaction.response.send_message(
+            "Save a character first with `/character add`, then try again.", ephemeral=True)
+    series = event["series_id"] or event["id"]
+    db.join_series(interaction.guild_id, series, uid, who["name"], who["wow_class"], who["spec"], who["role"])
+    extra = ""
+    if existing is None and not is_locked(event):
+        status, bench_from = apply_cap(event, uid, who["role"], "in")
+        db.set_signup(event_id, uid, who["name"], who["wow_class"], who["spec"], who["role"], status, bench_from)
+        extra = f" You're {status} for **{event['title']}** now."
+        await update_event(event_id)
+    await interaction.response.send_message(
+        f"You'll be signed up as **{who['name']}** ({who['spec']} {who['wow_class']}) for **{event['title']}** "
+        f"{repeat_label(event['repeat_days'])}, automatically.{extra} You can still press **Absent** on any date, "
+        "and stop with `/always leave`.", ephemeral=True)
+
+
+@always.command(name="leave", description="Stop being signed up automatically to a repeating raid")
+@app_commands.describe(series="The repeating raid to leave")
+@app_commands.autocomplete(series=my_series_autocomplete)
+async def always_leave(interaction: discord.Interaction, series: int):
+    ok = db.leave_series(series, interaction.user.id)
+    await interaction.response.send_message(
+        "Done. You won't be signed up automatically any more (dates you're already on stay as they are)." if ok else
+        "You weren't signed up automatically to that one.", ephemeral=True)
+
+
+@always.command(name="list", description="The repeating raids you're signed up to automatically")
+async def always_list(interaction: discord.Interaction):
+    rows = db.user_series(interaction.guild_id, interaction.user.id)
+    if not rows:
+        return await interaction.response.send_message(
+            "You aren't signed up automatically to anything. Use `/always join` on a repeating raid.", ephemeral=True)
+    lines = []
+    for m in rows:
+        latest = db.latest_in_series(m["series_id"])
+        title = f"**{latest['title']}** ({repeat_label(latest['repeat_days'])})" if latest and latest["repeat_days"] else (
+            f"**{latest['title']}**" if latest else "a raid that no longer exists")
+        lines.append(f"{title} as **{m['char_name']}** ({m['spec']} {m['wow_class']})")
+    await interaction.response.send_message("\n".join(lines)[:2000], ephemeral=True)
 
 
 @bot.tree.command(name="status", description="Bot health: version, uptime, permissions and backups")
@@ -1747,7 +1989,9 @@ async def help_command(interaction: discord.Interaction):
         "On a raid post press **Sign Up** and pick a character or class and spec. "
         "**Late / Tentative / Bench / Absent** change your status.\n"
         "`/character add` save a character (do this once, then sign up in one click)\n"
-        "`/character list` · `/character main` · `/character remove`"))
+        "`/character list` · `/character main` · `/character remove`\n"
+        "`/remindme` get reminders as a private message · `/always join` stay signed up to a repeating raid\n"
+        "The **Calendar** button on a raid post gives you a file for your calendar app."))
     embed.add_field(name="Officers", inline=False, value=(
         "`/raid create` post a raid (optionally ping a role)\n"
         "`/raid edit` change title, time, description or limits\n"
@@ -1826,6 +2070,7 @@ async def setup_hook():
     bot.tree.add_command(raid)
     bot.tree.add_command(config)
     bot.tree.add_command(stats)
+    bot.tree.add_command(always)
     if GUILD_ID:  # guild sync is instant; global sync can take up to an hour
         guild = discord.Object(id=GUILD_ID)
         bot.tree.copy_global_to(guild=guild)

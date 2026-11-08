@@ -219,9 +219,10 @@ sees the time in **their own** timezone with a live countdown.
 
 ### Signing up (players)
 1. **Once:** save your characters with `/character add` (name, class, spec). Pick one as your **main** with `/character main`.
-2. On a raid post click **Sign Up**, then choose a saved character (your main is marked ⭐) **or** pick a class and spec on
-   the spot if you haven't saved one.
-3. To change your mind click **Sign Up** again, or use the other buttons.
+2. On a raid post click **Sign Up**. If you've signed up before, the top button is **⚡ Sign up as (your last character)**:
+   one click and you're in. (Your main is used the very first time.) Or choose a different saved character (your main is
+   marked ⭐), **or** pick a class and spec on the spot if you haven't saved one.
+3. To change your mind, or switch character, click **Sign Up** again, or use the other buttons.
 
 | Button | Meaning |
 |---|---|
@@ -230,9 +231,22 @@ sees the time in **their own** timezone with a live countdown.
 | **Tentative** | Maybe. Not counted yet. |
 | **Bench** | Happy to fill in if there's room. |
 | **Absent** | You can't make it. |
+| **📅 Calendar** | Gives you a file (`.ics`) to add the raid to Google, Apple or Outlook calendar. Opening it again after the raid moves updates the entry. |
 
 Late / Tentative / Bench / Absent reuse the character you signed up with (or your main). If you've never signed up and have
 no saved character, the bot asks you to press **Sign Up** first.
+
+**When a role is full** you're put on the bench automatically, and the bot tells you your place in line (for example
+"#2 in line for a tank slot"). The bench list on the post shows it too, for example `(#2 tank)`. When a slot opens, the
+first person in line for that role is moved in and messaged.
+
+**Private reminders.** Type `/remindme on: True` and, before a raid you're signed up for, the bot messages you privately
+instead of pinging you in the channel. If your private messages from the server are closed, it pings you in the channel as
+usual. `/remindme on: False` goes back.
+
+**Repeating raids: sign up once.** For a raid that repeats every week, type `/always join`, pick the raid, and you are
+signed up to this one and to every new one as it is posted, with the character you chose. You can still press **Absent**
+on any single date. `/always list` shows what you're in, and `/always leave` stops it.
 
 ### What the bot does by itself
 - **Full roles → bench → promotion.** If a role's limit is reached, the next person is benched automatically. When a spot
@@ -249,6 +263,8 @@ no saved character, the bot asks you to press **Sign Up** first.
 |---|---|---|
 | Everyone | `/character add / list / main / remove` | Manage your saved characters |
 | Everyone | `/myraids` | The upcoming raids you've answered, with links |
+| Everyone | `/remindme` | Get raid reminders as a private message instead of a channel ping |
+| Everyone | `/always join / leave / list` | Stay signed up to a repeating raid automatically |
 | Everyone | `/stats me` | Your own attendance (last 90 days) |
 | Everyone | `/help` | Command list inside Discord |
 | Officers | `/raid create` | Post a raid (options: title, template, description, tanks, healers, dps, ping, repeat, thread) |
@@ -332,6 +348,8 @@ its own bot token) for a second server.
 
 **How do I get class icons?** They're not included, because the artwork belongs to Blizzard. Without them the bot uses coloured
 squares. To use icons, put images named after each class in the `icons` folder (see `icons/README.txt`).
+
+**Can I get the raid in my phone's calendar?** Yes: press the **📅 Calendar** button on the raid post and open the file it sends you. Raids have no end time, so the calendar shows 3 hours.
 
 **A player made a mistake. Can an officer fix their signup?** Yes. Use `/raid remove` to clear it, or `/raid add` to set their status, character or spec for them.
 

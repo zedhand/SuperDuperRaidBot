@@ -9,6 +9,7 @@ import os
 ROLES = ("tank", "healer", "dps")
 GROUPS = ("tank", "healer", "melee", "ranged")
 ROLE_LABEL = {"tank": "Tanks", "healer": "Healers", "dps": "DPS"}
+ROLE_SINGULAR = {"tank": "Tank", "healer": "Healer", "dps": "DPS"}
 GROUP_LABEL = {"tank": "Tank", "healer": "Healer", "melee": "Melee DPS", "ranged": "Ranged DPS"}
 GROUP_ICON = {"tank": "🛡️", "healer": "💚", "melee": "⚔️", "ranged": "🏹"}
 

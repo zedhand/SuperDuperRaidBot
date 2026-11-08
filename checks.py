@@ -12,6 +12,18 @@ import urllib.request
 from pathlib import Path
 
 API = "https://discord.com/api/v10"
+# The WoW versions the setup wizard offers, in menu order: {WOW_VERSION value: label}. Must match wow_data.PRESETS.
+PRESET_LABELS = {
+    "retail": "Retail (current expansion)",
+    "classic_era": "Classic Era / Hardcore",
+    "season_of_discovery": "Season of Discovery",
+    "tbc_classic": "Burning Crusade Classic",
+    "wrath_classic": "Wrath of the Lich King Classic",
+    "cata_classic": "Cataclysm Classic",
+    "mists_classic": "Mists of Pandaria Classic",
+    "wow_forever": "World of Warcraft: Forever",
+}
+
 USER_AGENT = "DiscordBot (https://github.com/zedhand/SuperDuperRaidBot, 1.12.0)"  # Discord blocks the default Python UA
 
 # View Channels + Send Messages + Embed Links + Read Message History + Use External Emojis

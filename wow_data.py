@@ -2,7 +2,7 @@
 
 Each preset maps  class -> {spec: group}  where group is "tank", "healer", "melee" or "ranged".
 Role caps use the broad role: tank, healer, or dps (melee + ranged together).
-Pick the active preset with WOW_VERSION in .env (default: retail).
+Pick the active preset with WOW_VERSION in .env (default: retail). Options: see PRESETS below.
 """
 import os
 
@@ -51,19 +51,71 @@ CLASSIC_ERA = {
     "Warrior": {"Arms": "melee", "Fury": "melee", "Protection": "tank"},
 }
 
-PRESETS = {"retail": RETAIL, "classic_era": CLASSIC_ERA}
+def _derive(base, **changes):
+    """A copy of a preset with some classes replaced/added (keeps the long lists from being typed out again)."""
+    out = {c: dict(specs) for c, specs in base.items()}
+    for cls, specs in changes.items():
+        out[cls.replace("_", " ")] = specs
+    return dict(sorted(out.items()))
 
+
+# Season of Discovery: the Era classes, plus the tanking/melee options its runes unlock.
+SEASON_OF_DISCOVERY = _derive(
+    CLASSIC_ERA,
+    Hunter={"Beast Mastery": "ranged", "Marksmanship": "ranged", "Survival": "ranged", "Survival (Melee)": "melee"},
+    Rogue={"Assassination": "melee", "Combat": "melee", "Combat (Tank)": "tank", "Subtlety": "melee"},
+    Shaman={"Elemental": "ranged", "Enhancement": "melee", "Enhancement (Tank)": "tank", "Restoration": "healer"},
+    Warlock={"Affliction": "ranged", "Demonology": "ranged", "Demonology (Tank)": "tank", "Destruction": "ranged"},
+)
+
+# Burning Crusade Classic: same nine classes as Era (Paladin and Shaman for everyone).
+TBC_CLASSIC = _derive(CLASSIC_ERA)
+
+# Wrath of the Lich King Classic and Cataclysm Classic add the Death Knight.
+DEATH_KNIGHT = {"Blood": "tank", "Frost": "melee", "Unholy": "melee"}
+WRATH_CLASSIC = _derive(CLASSIC_ERA, Death_Knight=DEATH_KNIGHT)
+CATACLYSM_CLASSIC = _derive(CLASSIC_ERA, Death_Knight=DEATH_KNIGHT)
+
+# Mists of Pandaria Classic adds the Monk and the Guardian druid spec.
+MISTS_CLASSIC = _derive(
+    WRATH_CLASSIC,
+    Druid={"Balance": "ranged", "Feral": "melee", "Guardian": "tank", "Restoration": "healer"},
+    Monk={"Brewmaster": "tank", "Mistweaver": "healer", "Windwalker": "melee"},
+)
+
+# World of Warcraft: Forever (Classic+, launched Nov 4 2026): the nine Classic classes. Blizzard says it keeps
+# Classic's simple class design and adds options per class; adjust this list if your realm shows new specs.
+WOW_FOREVER = _derive(CLASSIC_ERA)
+
+PRESETS = {
+    "retail": RETAIL,
+    "classic_era": CLASSIC_ERA,
+    "season_of_discovery": SEASON_OF_DISCOVERY,
+    "tbc_classic": TBC_CLASSIC,
+    "wrath_classic": WRATH_CLASSIC,
+    "cata_classic": CATACLYSM_CLASSIC,
+    "mists_classic": MISTS_CLASSIC,
+    "wow_forever": WOW_FOREVER,
+}
 # Utility a raid usually wants. Shown as a warning on the post (only if an admin turns it on with /config buffs)
 # when nobody who can provide it has signed up. {key: (what to call it, classes that provide it)}.
 # Deliberately short and certain; edit it when the game changes. Classic Era has no Bloodlust.
+_BR_CLASSIC = {"battle_res": ("a battle res", ("Druid",))}
+_BL_SHAMAN = {"bloodlust": ("Bloodlust", ("Shaman",))}
 UTILITY_BY_PRESET = {
     "retail": {
         "bloodlust": ("Bloodlust", ("Shaman", "Mage", "Evoker", "Hunter")),
         "battle_res": ("a battle res", ("Druid", "Death Knight", "Warlock", "Paladin")),
     },
-    "classic_era": {
-        "battle_res": ("a battle res", ("Druid",)),
-    },
+    "classic_era": dict(_BR_CLASSIC),
+    "season_of_discovery": dict(_BR_CLASSIC),
+    "tbc_classic": {**_BL_SHAMAN, **_BR_CLASSIC},
+    "wrath_classic": {**_BL_SHAMAN, "battle_res": ("a battle res", ("Druid", "Death Knight"))},
+    "cata_classic": {"bloodlust": ("Bloodlust", ("Shaman", "Mage")),
+                     "battle_res": ("a battle res", ("Druid", "Death Knight"))},
+    "mists_classic": {"bloodlust": ("Bloodlust", ("Shaman", "Mage", "Hunter")),
+                      "battle_res": ("a battle res", ("Druid", "Death Knight", "Warlock"))},
+    "wow_forever": dict(_BR_CLASSIC),
 }
 UTILITY_MIN_ATTENDING = 8  # smaller groups aren't nagged about utility
 
@@ -71,7 +123,7 @@ _name = (os.getenv("WOW_VERSION") or "retail").strip().lower()
 if _name not in PRESETS:
     raise SystemExit(f"Unknown WOW_VERSION '{_name}'. Options: {', '.join(PRESETS)}")
 DATA = PRESETS[_name]
-PRESET_NAME = _name  # "retail" or "classic_era"
+PRESET_NAME = _name  # a key of PRESETS, e.g. "retail" or "wrath_classic"
 UTILITY = UTILITY_BY_PRESET.get(_name, {})
 
 

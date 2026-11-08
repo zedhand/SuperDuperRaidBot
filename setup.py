@@ -222,14 +222,13 @@ def pick_timezone(current: str) -> str:
 
 def pick_version() -> str:
     say("Which WoW class list should the bot use?")
-    say("  1. Retail (current expansion)")
-    say("  2. Classic Era")
+    keys = list(checks.PRESET_LABELS)
+    for i, key in enumerate(keys, 1):
+        say(f"  {i}. {checks.PRESET_LABELS[key]}")
     while True:
         raw = ask("Number: ")
-        if raw == "1":
-            return "retail"
-        if raw == "2":
-            return "classic_era"
+        if raw.isdigit() and 1 <= int(raw) <= len(keys):
+            return keys[int(raw) - 1]
 
 
 def offer_shortcuts():

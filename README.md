@@ -273,6 +273,7 @@ on any single date. `/always list` shows what you're in, and `/always leave` sto
 | Everyone | `/character add / list / main / remove` | Manage your saved characters |
 | Everyone | `/myraids` | The upcoming raids you've answered, with links |
 | Everyone | `/remindme` | Get raid reminders as a private message instead of a channel ping |
+| Everyone | `/forgetme` | Delete your characters and signup history from the bot (asks first, can't be undone) |
 | Everyone | `/character import` | Look a **retail** character up on Raider.IO and save it (only if an admin turned it on) |
 | Everyone | `/always join / leave / list` | Stay signed up to a repeating raid automatically |
 | Everyone | `/stats me` | Your own attendance (last 90 days) |
@@ -468,6 +469,11 @@ Everything lives in `raidbot.db` (SQLite) next to the bot: characters, raids and
 `backups/` and keeps the newest 7. To restore, stop the bot, copy a backup over `raidbot.db`, start it again. No data leaves
 your machine except what Discord itself receives (the posts and messages the bot sends). The bot does not read your server's
 chat messages.
+
+Any player can type `/forgetme` to delete what the bot stores about them, in every server it's in: their characters, their
+signups (and so their attendance history), their `/always` sign-ups, their `/remindme` setting and their place in raids
+kept for `/raid restore`. The bot asks first, then takes their name off the raid posts. Raids they created stay. The daily
+backups still hold the old data until they're replaced (within 7 days), as does any copy an admin made with `/config backup`.
 
 Admins can get a copy of the database any time with `/config backup` (it contains your members' Discord IDs, so keep it private). If `raidbot.db` is ever damaged, the bot restores the newest healthy daily backup on the next start, keeps the damaged file as `raidbot.db.damaged-<time>`, and `/status` tells you it happened. If there is no healthy backup it stops and explains, leaving the file untouched. Errors are also written to `raidbot.log` (the newest 5 MB are kept).
 

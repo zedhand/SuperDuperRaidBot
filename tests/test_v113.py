@@ -268,5 +268,65 @@ run(B.raid_remove.callback(i, eid, raider))
 check("removing someone who isn't signed up says so, without a question",
       "isn't signed up" in text(i) and "view" not in i.response.sent[0][1], text(i))
 
+print("/forgetme deletes a player's own data, after asking")
+me, other_player = member(70), member(71)
+fa = new_raid("Forget A")
+db.set_signup(fa, 70, "Arthas", "Paladin", "Protection", "tank", "in", None)
+db.set_signup(fa, 71, "Uther", "Paladin", "Holy", "healer", "in", None)
+db.update_event(fa, cap_tank=1)
+db.set_signup(fa, 72, "Varian", "Warrior", "Protection", "tank", "bench", "in")
+fb = new_raid("Forget B")
+db.set_signup(fb, 70, "Arthas", "Paladin", "Protection", "tank", "late", None)
+db._run("UPDATE events SET guild_id=2 WHERE id=?", (fb,))  # another server: forgotten there too
+fc = new_raid("Forget cancelled")
+db.set_signup(fc, 70, "Arthas", "Paladin", "Protection", "tank", "in", None)
+db.cancel_event(fc, 1)
+db.upsert_character(70, "Arthas", "Paladin", "Protection", "tank", True)
+db.upsert_character(70, "Kael", "Mage", "Fire", "dps", False)
+db.upsert_character(71, "Uther", "Paladin", "Holy", "healer", True)
+db.join_series(G, fa, 70, "Arthas", "Paladin", "Protection", "tank")
+db.join_series(G, fa, 71, "Uther", "Paladin", "Holy", "healer")
+db.set_setting(G, "dm_remind@70", "1")
+db.set_setting(G, "dm_remind@71", "1")
+db.set_setting(G, "ping_role@70", "123")  # not a player setting (a channel's), even if the number matched
+
+i = inter(me)
+run(B.forgetme.callback(i))
+check("/forgetme asks first and deletes nothing yet", len(db.characters(70)) == 2 and db.signup(fa, 70) is not None
+      and "can't be undone" in text(i), text(i))
+check("the question is private and says what would go",
+      i.response.sent[0][1].get("ephemeral") is True and "2 characters" in text(i) and "3 raid signups" not in text(i)
+      and "2 raid signups" in text(i) and "1 repeating-raid sign-up" in text(i) and "/remindme" in text(i)
+      and "1 cancelled raid" in text(i), text(i))
+no = press(i, "No", user=me)
+check("'No, keep it' keeps everything", len(db.characters(70)) == 2 and db.signup(fa, 70) and "Nothing was changed" in text(no))
+
+i = inter(me)
+run(B.forgetme.callback(i))
+CH[11].edits.clear()
+DMS.clear()
+yes = press(i, "Yes, delete", user=me)
+check("characters are gone", db.characters(70) == [])
+check("signups are gone in every server", db.signup(fa, 70) is None and db.signup(fb, 70) is None)
+check("attendance is gone", db.stats(G, 0, 2**31, user_id=70) == [] and db.stats(2, 0, 2**31, user_id=70) == [])
+check("/always sign-ups are gone", db.user_series(G, 70) == [])
+check("their /remindme setting is gone, other settings stay",
+      db.setting(G, "dm_remind@70") is None and db.setting(G, "ping_role@70") == "123")
+snap = json.loads(db.cancelled_event(fc)["signups_json"])
+check("their place in a cancelled raid's copy is gone, the others stay",
+      70 not in [s["user_id"] for s in snap] and {50, 51, 52} <= {s["user_id"] for s in snap}, snap)
+check("other players are untouched", len(db.characters(71)) == 1 and db.signup(fa, 71) is not None
+      and db.user_series(G, 71) and db.setting(G, "dm_remind@71") == "1")
+check("raids they were on still exist", db.event(fa) is not None and db.event(fb) is not None)
+check("the reply confirms it", "Done. Deleted 2 characters" in text(yes) and "no longer has anything stored" in text(yes), text(yes))
+check("the raid post is redrawn without them", any(mid == 500 + fa for mid, _ in CH[11].edits), CH[11].edits)
+check("the freed tank slot goes to the bench", db.signup(fa, 72)["status"] == "in" and any(u == 72 for u, _ in DMS), DMS)
+check("restoring the cancelled raid brings back the others, not them",
+      db.restore_event(fc) == 3 and db.signup(fc, 70) is None)
+i = inter(me)
+run(B.forgetme.callback(i))
+check("running it again says there's nothing left, without a question",
+      "nothing stored about you" in text(i) and "view" not in i.response.sent[0][1], text(i))
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

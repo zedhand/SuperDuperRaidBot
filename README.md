@@ -296,7 +296,7 @@ on any single date. `/always list` shows what you're in, and `/always leave` sto
 | Officers | `/raid copy` | The same raid on a new date (same limits and description, no signups) |
 | Officers | `/raid repeat` | Repeat weekly or every 2 weeks, or stop repeating |
 | Officers | `/raid template save / list / delete` | Saved setups; use one with `/raid create template:` |
-| Officers | `/raid roster` | A private, copy-friendly list of who's coming |
+| Officers | `/raid roster` | A private, copy-friendly list of who's coming. Add `invites: True` for `/invite Name-Realm` lines to paste into WoW |
 | Officers | `/raid noshow` | Mark someone who signed up but didn't turn up (add `undo: True` to take it back) |
 | Officers | `/raid close` | Close signups (run it again to reopen) |
 | Officers | `/raid cancel` | Delete a raid and its post (and thread). `/raid restore` undoes it |
@@ -388,6 +388,8 @@ squares. To use icons, put images named after each class in the `icons` folder (
 **Can I get the raid in my phone's calendar?** Yes: press the **📅 Calendar** button on the raid post and open the file it sends you. Raids have no end time, so the calendar shows 3 hours.
 
 **I cancelled the wrong raid. Can I get it back?** Yes, for 14 days. `/raid restore` lists this server's recently cancelled raids; pick one and it is posted again in its channel with everyone's signups. After 14 days the copy is deleted for good.
+
+**How do I invite everyone in game without typing each name?** Run `/raid roster invites: True`. It gives you one `/invite` line per player who is in or late, with the realm (`Thrall-Area52`) for anyone whose saved character has one, so players from other realms work too. Paste a line into WoW chat, or each block into its own macro: the lines are grouped so a block fits in one macro (255 characters). Players on the bench, tentative or marked as a no-show aren't listed.
 
 **Someone is on the bench but we want them in tonight. Can we skip the line?** Yes. `/raid promote` moves that player in straight away and tells them. If their role or class is already full it asks you to free a slot first, or to add `over_limit: True` to take them in anyway.
 

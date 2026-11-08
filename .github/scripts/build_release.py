@@ -14,6 +14,7 @@ personal folder path.
 """
 import argparse
 import hashlib
+import os
 import re
 import sys
 import zipfile
@@ -38,10 +39,34 @@ SECRETS = [
     ("Discord webhook URL", re.compile(r"discord(?:app)?\.com/api/webhooks/\d+/[\w-]+", re.I)),
     ("GitHub token", re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,})")),
     ("private key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
+    ("personal email address", re.compile(
+        r"[A-Za-z0-9._%+-]+@(?:gmail|googlemail|outlook|hotmail|live|msn|yahoo|icloud|me|aol|proton|protonmail|gmx)\.[a-z.]{2,6}\b",
+        re.I)),
     ("Discord ID (17-20 digit number)", re.compile(r"(?<![\w.])\d{17,20}(?![\w.])")),
     ("personal Windows folder", re.compile(r"[A-Za-z]:\\+Users\\+(?!Public\\|Default\\|<|%|you|YOUR)[^\\\s\"']+", re.I)),
     ("personal home folder", re.compile(r"/(?:home|Users)/(?!youruser\b|you\b|<|\$)[A-Za-z0-9._-]+")),
 ]
+# Optional private name blocklist: SHA-256 hashes of lower-cased words or two-word pairs (friends' names, Discord
+# contacts), whitespace-separated, given in the LEAK_BLOCKLIST environment variable (a repository secret in CI).
+# Only the hashes are ever stored, and a match is reported by file and line, never by the word itself.
+def load_blocklist() -> set:
+    raw = os.environ.get("LEAK_BLOCKLIST", "")
+    return {h.lower() for h in raw.split() if re.fullmatch(r"[0-9a-fA-F]{64}", h)}
+
+
+def blocked_names(line: str, hashes: set) -> int:
+    if not hashes:
+        return 0
+    words = re.findall(r"[A-Za-z0-9]+", line)
+    hits = 0
+    for i, w in enumerate(words):
+        if len(w) >= 3 and hashlib.sha256(w.lower().encode()).hexdigest() in hashes:
+            hits += 1
+        if i + 1 < len(words) and hashlib.sha256(f"{w} {words[i + 1]}".lower().encode()).hexdigest() in hashes:
+            hits += 1
+    return hits
+
+
 # Settings that must ship empty: a value here would be someone's real token or server.
 MUST_BE_EMPTY = ("DISCORD_TOKEN", "GUILD_ID")
 FORBIDDEN_NAMES = re.compile(r"(^|/)(\.env\.|\.venv/|__pycache__/|backups/|\.git/)|\.(db|log|pyc|sqlite3?)$|"
@@ -73,8 +98,9 @@ def build(out: Path) -> None:
         z.write(ROOT / ENV_SOURCE, f"{TOP}/.env")
 
 
-def scan(zip_path: Path) -> list:
+def scan(zip_path: Path, hashes=None) -> list:
     """Return a list of problems found in the zip (empty means it is safe to publish)."""
+    hashes = load_blocklist() if hashes is None else hashes
     problems = []
     expected = {f"{TOP}/{n}" for n in FILES} | {f"{TOP}/.env"}
     with zipfile.ZipFile(zip_path) as z:
@@ -93,6 +119,8 @@ def scan(zip_path: Path) -> list:
                 for label, rx in SECRETS:
                     if rx.search(line):
                         problems.append(f"{name}:{lineno}: looks like a {label}")
+                if blocked_names(line, hashes):
+                    problems.append(f"{name}:{lineno}: contains a name from the private blocklist")
             if name.endswith("/.env"):
                 for key in MUST_BE_EMPTY:
                     m = re.search(rf"^{key}=(.*)$", text, re.M)
@@ -130,7 +158,9 @@ def main(argv=None) -> int:
         return 1
 
     sha = hashlib.sha256(out.read_bytes()).hexdigest()
-    print(f"Built {out} ({out.stat().st_size} bytes)\nsha256 {sha}\nScan: clean")
+    names = len(load_blocklist())
+    print(f"Built {out} ({out.stat().st_size} bytes)\nsha256 {sha}\nScan: clean"
+          + (f" (including {names} blocked names)" if names else " (no LEAK_BLOCKLIST given, so names were not checked)"))
     if args.notes:
         Path(args.notes).write_text(changelog_section(ver) + "\n", encoding="utf-8")
     if args.github_output:

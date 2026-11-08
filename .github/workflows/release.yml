@@ -38,6 +38,9 @@ jobs:
         id: build
         env:
           TAG: ${{ github.ref_name }}
+          # Optional: the contents of the local .git/leak-blocklist.sha256 (hashes only), saved as a repository
+          # secret. When it is set, the zip is also checked for those names. Empty or missing just skips that check.
+          LEAK_BLOCKLIST: ${{ secrets.LEAK_BLOCKLIST }}
         run: >
           python .github/scripts/build_release.py
           --tag "$TAG"

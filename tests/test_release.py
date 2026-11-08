@@ -64,9 +64,10 @@ bad = {
     "a filled-in server ID in .env": {"SuperDuperRaidBot/.env": "DISCORD_TOKEN=\nGUILD_ID=123\n"},
     "a bot token in code": {"SuperDuperRaidBot/bot.py": f'TOKEN = "{fake_token}"\n'},
     "a Discord ID": {"SuperDuperRaidBot/README.md": "server 112233445566778899 here\n"},
+    "a personal email": {"SuperDuperRaidBot/README.md": "mail someone.example@gmail.com\n"},
     "a webhook URL": {"SuperDuperRaidBot/README.md": "https://discord.com/api/webhooks/1/abc-DEF\n"},
-    "a personal Windows path": {"SuperDuperRaidBot/README.md": r"see C:\Users\Dez\Desktop" + "\n"},
-    "a personal home path": {"SuperDuperRaidBot/README.md": "see /home/dez/bot\n"},
+    "a personal Windows path": {"SuperDuperRaidBot/README.md": r"see C:\Users\alex\Desktop" + "\n"},
+    "a personal home path": {"SuperDuperRaidBot/README.md": "see /home/alex/bot\n"},
     "a database file": {"SuperDuperRaidBot/raidbot.db": "x"},
     "a log file": {"SuperDuperRaidBot/raidbot.log": "x"},
     "icon artwork": {"SuperDuperRaidBot/icons/mage.jpg": "x"},
@@ -75,6 +76,14 @@ bad = {
 }
 for label, extra in bad.items():
     check(f"scan catches {label}", planted(extra) != [])
+import hashlib  # noqa: E402
+blocked = {hashlib.sha256(b"zorblax").hexdigest(), hashlib.sha256(b"quinn vexley").hexdigest()}
+check("blocklisted single name is caught", br.blocked_names("signed up: Zorblax (mage)", blocked) == 1)
+check("blocklisted two-word name is caught", br.blocked_names("thanks Quinn Vexley!", blocked) == 1)
+check("the real zip has no blocklisted names", br.scan(zpath, blocked) == [])
+planted({"SuperDuperRaidBot/README.md": "hi zorblax\n"})
+check("a blocklisted name fails the scan", any("blocklist" in p for p in br.scan(tmp / "bad.zip", blocked)))
+check("no blocklist means no name check", br.blocked_names("zorblax", set()) == 0)
 check("generic example paths are allowed",
       planted({"SuperDuperRaidBot/README.md": "/home/youruser/SuperDuperRaidBot and C:\\RaidBot\n"}) == [])
 

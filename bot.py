@@ -35,7 +35,7 @@ load_dotenv(ENV_PATH)
 
 import checks  # noqa: E402
 import wow_data as wd  # noqa: E402  # noqa: E402  (after load_dotenv so WOW_VERSION is read)
-from db import caps_dict, caps_text, open_database  # noqa: E402
+from db import KEEP_CANCELLED_DAYS, caps_dict, caps_text, open_database  # noqa: E402
 from embeds import build_embed, text_problem  # noqa: E402
 
 def _env_int(name: str, default: int) -> int:
@@ -1474,28 +1474,141 @@ async def raid_close(interaction: discord.Interaction, event_id: int):
     await refresh_message(event_id)
 
 
-@raid.command(name="cancel", description="Delete an event and its post")
+class ConfirmView(discord.ui.View):
+    """Private "are you sure?" buttons for a step that deletes something. Only the officer who ran the command sees
+    them (the reply is ephemeral). No answer within a minute means nothing happens."""
+
+    def __init__(self, interaction: discord.Interaction, confirm_label: str, action):
+        super().__init__(timeout=60)
+        self.interaction, self.action = interaction, action  # action(click) does the work and replies to the click
+        self.yes.label = confirm_label
+
+    @discord.ui.button(label="Yes", style=discord.ButtonStyle.danger)
+    async def yes(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.stop()
+        await self.action(interaction)
+
+    @discord.ui.button(label="No, keep it", style=discord.ButtonStyle.secondary)
+    async def no(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.stop()
+        await interaction.response.edit_message(content="Nothing was changed.", view=None)
+
+    async def on_timeout(self):
+        try:
+            await self.interaction.edit_original_response(content="No answer, so nothing was changed.", view=None)
+        except discord.HTTPException:
+            pass
+
+
+def _signup_count(event_id: int) -> str:
+    rows = db.signups(event_id)
+    coming = sum(1 for r in rows if r["status"] in ("in", "late"))
+    return f"{plural(len(rows), 'signup')} ({coming} coming)" if rows else "no signups"
+
+
+@raid.command(name="cancel", description="Delete an event and its post (asks first; /raid restore undoes it)")
 @app_commands.autocomplete(event_id=event_autocomplete)
 async def raid_cancel(interaction: discord.Interaction, event_id: int):
     event = await _get_event(interaction, event_id)
     if not event:
         return await interaction.response.send_message("Event not found.", ephemeral=True)
-    await delete_event_post(event)
-    db.delete_event(event_id)
-    await audit(interaction.guild_id, f"🗑️ {interaction.user.mention} cancelled **{event['title']}** (#{event_id})")
-    await interaction.response.send_message(f"Event #{event_id} deleted.", ephemeral=True)
+    when = f"<t:{event['start_ts']}:f>"
+
+    async def do_cancel(click: discord.Interaction):
+        current = db.event(event_id)
+        if not current:
+            return await click.response.edit_message(content=f"Event #{event_id} is already gone.", view=None)
+        db.cancel_event(event_id, click.user.id)
+        await click.response.edit_message(
+            content=f"Event #{event_id} (**{current['title']}**) cancelled. Changed your mind? "
+                    f"`/raid restore` brings it back with its signups for the next {KEEP_CANCELLED_DAYS} days.",
+            view=None)
+        await delete_event_post(current)
+        await audit(click.guild_id, f"🗑️ {click.user.mention} cancelled **{current['title']}** (#{event_id})")
+
+    await interaction.response.send_message(
+        f"Cancel **{event['title']}** ({when}, #{event_id})? Its post goes away and it has {_signup_count(event_id)}.",
+        view=ConfirmView(interaction, "Yes, cancel it", do_cancel), ephemeral=True)
 
 
-@raid.command(name="remove", description="Remove a member's signup")
+async def cancelled_autocomplete(interaction: discord.Interaction, current: str):
+    out = []
+    for c in db.cancelled_events(interaction.guild_id):
+        when = datetime.fromtimestamp(c["start_ts"], guild_tz(interaction.guild_id)).strftime("%a %b %d %H:%M")
+        label = f"{c['title']} · {when} (#{c['event_id']})"
+        if current.lower() in label.lower():
+            out.append(app_commands.Choice(name=label[:100], value=c["event_id"]))
+    return out[:25]
+
+
+@raid.command(name="restore", description="Bring back a raid cancelled in the last 14 days, with its signups")
+@app_commands.describe(event_id="The cancelled raid (the list shows this server's recent cancellations)")
+@app_commands.autocomplete(event_id=cancelled_autocomplete)
+async def raid_restore(interaction: discord.Interaction, event_id: int):
+    copy = db.cancelled_event(event_id)
+    if not copy or copy["guild_id"] != interaction.guild_id:
+        return await interaction.response.send_message(
+            f"There's no cancelled raid #{event_id} to restore. Raids can be restored for "
+            f"{KEEP_CANCELLED_DAYS} days after they're cancelled.", ephemeral=True)
+    if not can_manage_channel(interaction, copy["channel_id"]):
+        return await interaction.response.send_message(
+            "You can only manage raids in channels you're an officer for.", ephemeral=True)
+    channel = bot.get_channel(copy["channel_id"])
+    if channel is None:
+        return await interaction.response.send_message(
+            "The raid's channel no longer exists, so there's nowhere to post it again.", ephemeral=True)
+    restored = db.restore_event(event_id)
+    if restored is None:
+        return await interaction.response.send_message(f"Raid #{event_id} has already been restored.", ephemeral=True)
+    event = db.event(event_id)
+    locked = is_locked(event)
+    try:
+        msg = await channel.send(embed=render_embed(event, db.signups(event_id), locked),
+                                 view=ClosedView() if locked else RaidView(),
+                                 allowed_mentions=discord.AllowedMentions.none())
+    except discord.HTTPException:
+        db.undo_restore(copy)  # put it back the way it was, so it can still be restored later
+        return await interaction.response.send_message(
+            f"I couldn't post in {channel.mention}, so the raid is still cancelled. Check my permissions there.",
+            ephemeral=True)
+    db.set_message_id(event_id, msg.id)
+    notes = ""
+    if json.loads(copy["event_json"]).get("thread_id"):  # it had a discussion thread: start a new one
+        when = datetime.fromtimestamp(event["start_ts"], guild_tz(interaction.guild_id))
+        try:
+            th = await msg.create_thread(name=f"{event['title']} · {when:%b %d}"[:100], auto_archive_duration=10080)
+            db.update_event(event_id, thread_id=th.id)
+        except discord.DiscordException:
+            notes = " (I couldn't start its discussion thread again.)"
+    await audit(interaction.guild_id, f"♻️ {interaction.user.mention} restored **{event['title']}** (#{event_id})")
+    await interaction.response.send_message(
+        f"Restored **{event['title']}** with {plural(restored, 'signup')}: {getattr(msg, 'jump_url', '')}{notes}",
+        ephemeral=True)  # signups come back exactly as they were, so nobody is promoted or messaged here
+
+
+@raid.command(name="remove", description="Remove a member's signup (asks first)")
 @app_commands.autocomplete(event_id=event_autocomplete)
 async def raid_remove(interaction: discord.Interaction, event_id: int, member: discord.Member):
-    if not await _get_event(interaction, event_id):
+    event = await _get_event(interaction, event_id)
+    if not event:
         return await interaction.response.send_message("Event not found.", ephemeral=True)
-    db.remove_signup(event_id, member.id)
-    await audit(interaction.guild_id, f"🚫 {interaction.user.mention} removed {member.mention} from #{event_id}")
-    await interaction.response.send_message(f"Removed {member.mention} from event #{event_id}.",
-                                            ephemeral=True)
-    await update_event(event_id)
+    row = db.signup(event_id, member.id)
+    if not row:
+        return await interaction.response.send_message(
+            f"{member.mention} isn't signed up for **{event['title']}**, so there's nothing to remove.",
+            ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+    what = f"{row['char_name']}, {row['status']}" if row["char_name"] else row["status"]
+
+    async def do_remove(click: discord.Interaction):
+        db.remove_signup(event_id, member.id)
+        await click.response.edit_message(content=f"Removed {member.mention} from event #{event_id}.", view=None)
+        await audit(click.guild_id, f"🚫 {click.user.mention} removed {member.mention} from #{event_id}")
+        await update_event(event_id)
+
+    await interaction.response.send_message(
+        f"Remove {member.mention} ({what}) from **{event['title']}** (#{event_id})?",
+        view=ConfirmView(interaction, "Yes, remove", do_remove), ephemeral=True,
+        allowed_mentions=discord.AllowedMentions.none())
 
 
 @raid.command(name="unsigned", description="List members of a role who haven't responded")
@@ -1864,6 +1977,10 @@ async def backup_loop():
             log.info("Backed up the database to %s", made.name)
     except Exception as e:  # a failed backup must never stop the bot
         log.warning("Database backup failed: %s", e)
+    try:
+        db.purge_cancelled()  # cancelled raids can be restored for 14 days, then they're gone for good
+    except Exception as e:
+        log.warning("Clearing old cancelled raids failed: %s", e)
 
 
 @reminder_loop.before_loop
@@ -2629,7 +2746,7 @@ async def help_command(interaction: discord.Interaction):
         "`/raid template save|list|delete` saved setups, then `/raid create template:`\n"
         "`/raid noshow` mark someone who didn't turn up · `/stats team` everyone's attendance · `/stats export` as a spreadsheet\n"
         "`/raid list` upcoming raids with counts · `/raid add` sign someone up or change their status\n"
-        "`/raid close` · `/raid cancel` · `/raid remove` · `/raid unsigned`"))
+        "`/raid close` · `/raid cancel` (undo: `/raid restore`) · `/raid remove` · `/raid unsigned`"))
     embed.add_field(name="Admins", inline=False, value=(
         "`/config show` · `/config timezone` · `/config reminder`\n"
         "`/config officer` who can manage every raid · `/config pingrole` default role to ping\n"

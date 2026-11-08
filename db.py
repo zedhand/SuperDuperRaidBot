@@ -1,5 +1,7 @@
 """Tiny SQLite layer. Synchronous is fine for one guild's traffic."""
+import json
 import shutil
+import time
 import sqlite3
 from datetime import date, datetime
 from pathlib import Path
@@ -68,7 +70,20 @@ CREATE TABLE IF NOT EXISTS series_signups (
     role TEXT NOT NULL,
     PRIMARY KEY (series_id, user_id)
 );
+CREATE TABLE IF NOT EXISTS cancelled_events (
+    event_id INTEGER PRIMARY KEY,
+    guild_id INTEGER NOT NULL,
+    channel_id INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    start_ts INTEGER NOT NULL,
+    cancelled_ts INTEGER NOT NULL,
+    cancelled_by INTEGER NOT NULL,
+    event_json TEXT NOT NULL,
+    signups_json TEXT NOT NULL
+);
 """
+
+KEEP_CANCELLED_DAYS = 14  # /raid restore can bring a cancelled raid back for this long
 
 # Columns added after v1.0: (table, column, definition). Each is added only if it is missing, so a real
 # error (a locked or damaged file) is never mistaken for "already there". Older databases keep their data.
@@ -237,6 +252,73 @@ class DB:
 
     def delete_event(self, event_id):
         self._run("DELETE FROM events WHERE id=?", (event_id,))
+
+    # ---- cancelled raids (kept KEEP_CANCELLED_DAYS for /raid restore) ----
+    def cancel_event(self, event_id, by_user, now=None):
+        """Delete a raid but keep a copy of it and its signups so /raid restore can bring it back.
+        Returns False if there was no such raid. Event ids are never reused (AUTOINCREMENT), so the copy
+        can go back in under the same id."""
+        now = int(time.time()) if now is None else now
+        event = self.event(event_id)
+        if not event:
+            return False
+        signups = [dict(r) for r in self.signups(event_id)]
+        with self.conn:  # one transaction: the copy is saved and the raid deleted, or neither
+            self.conn.execute(
+                "INSERT OR REPLACE INTO cancelled_events(event_id,guild_id,channel_id,title,start_ts,cancelled_ts,"
+                "cancelled_by,event_json,signups_json) VALUES(?,?,?,?,?,?,?,?,?)",
+                (event_id, event["guild_id"], event["channel_id"], event["title"], event["start_ts"], now, by_user,
+                 json.dumps(dict(event)), json.dumps(signups)))
+            self.conn.execute("DELETE FROM events WHERE id=?", (event_id,))
+        return True
+
+    def cancelled_events(self, guild_id, now=None):
+        """This server's raids that can still be restored, newest cancellation first."""
+        now = int(time.time()) if now is None else now
+        return self._all("SELECT * FROM cancelled_events WHERE guild_id=? AND cancelled_ts>? ORDER BY cancelled_ts DESC",
+                         (guild_id, now - KEEP_CANCELLED_DAYS * 86400))
+
+    def cancelled_event(self, event_id, now=None):
+        now = int(time.time()) if now is None else now
+        return self._one("SELECT * FROM cancelled_events WHERE event_id=? AND cancelled_ts>?",
+                         (event_id, now - KEEP_CANCELLED_DAYS * 86400))
+
+    def restore_event(self, event_id):
+        """Put a cancelled raid and its signups back. The old post is gone, so message_id and thread_id start at 0
+        and the caller posts a new one. Returns the number of signups restored, or None if there is no copy."""
+        row = self._one("SELECT * FROM cancelled_events WHERE event_id=?", (event_id,))
+        if not row or self.event(event_id):
+            return None
+        event = json.loads(row["event_json"])
+        event.update(message_id=0, thread_id=0, archived=0)
+        signups = json.loads(row["signups_json"])
+        ev_cols = {r[1] for r in self.conn.execute("PRAGMA table_info(events)")}
+        su_cols = {r[1] for r in self.conn.execute("PRAGMA table_info(signups)")}
+        with self.conn:
+            # column names come from the table itself (PRAGMA table_info), values are bound parameters
+            cols = [c for c in event if c in ev_cols]
+            self.conn.execute(f"INSERT INTO events({','.join(cols)}) VALUES({','.join('?' * len(cols))})",  # nosec B608
+                              [event[c] for c in cols])
+            for s in signups:
+                cols = [c for c in s if c in su_cols]
+                self.conn.execute(f"INSERT INTO signups({','.join(cols)}) VALUES({','.join('?' * len(cols))})",  # nosec B608
+                                  [s[c] for c in cols])
+            self.conn.execute("DELETE FROM cancelled_events WHERE event_id=?", (event_id,))
+        return len(signups)
+
+    def undo_restore(self, copy):
+        """Take back a restore whose new post couldn't be sent: delete the raid again and put the original copy
+        (a row from cancelled_events, with the old thread and post ids) back exactly as it was."""
+        with self.conn:
+            self.conn.execute("DELETE FROM events WHERE id=?", (copy["event_id"],))
+            self.conn.execute(f"INSERT OR REPLACE INTO cancelled_events({','.join(copy.keys())}) "  # nosec B608
+                              f"VALUES({','.join('?' * len(copy.keys()))})", tuple(copy))
+
+    def purge_cancelled(self, now=None):
+        """Forget cancelled raids older than KEEP_CANCELLED_DAYS. Returns how many were dropped."""
+        now = int(time.time()) if now is None else now
+        return self._run("DELETE FROM cancelled_events WHERE cancelled_ts<=?",
+                         (now - KEEP_CANCELLED_DAYS * 86400,)).rowcount
 
     def pending_reminders(self, now):
         """Upcoming events not reminded yet. The caller applies each server's own lead time."""

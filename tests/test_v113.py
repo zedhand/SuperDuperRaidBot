@@ -64,6 +64,7 @@ check("an unknown version stops with the list of valid ones", r.returncode != 0 
 import asyncio  # noqa: E402
 import json  # noqa: E402
 import time  # noqa: E402
+from datetime import datetime, timedelta  # noqa: E402
 import types  # noqa: E402
 
 import discord  # noqa: E402
@@ -354,6 +355,117 @@ i = inter(me)
 run(B.forgetme.callback(i))
 check("running it again says there's nothing left, without a question",
       "nothing stored about you" in text(i) and "view" not in i.response.sent[0][1], text(i))
+
+print("daily backup post in a private admin channel (/config backupchannel)")
+import sqlite3  # noqa: E402
+
+EVERYONE, ME = object(), object()
+
+
+class AdminChannel(FakeChannel):
+    """A channel whose permissions differ for @everyone and for the bot."""
+    def __init__(self, cid, public=False, can_attach=True):
+        super().__init__(cid)
+        self.public, self.can_attach = public, can_attach
+        self.guild = types.SimpleNamespace(id=G, me=ME, default_role=EVERYONE, get_role=lambda r: None, get_member=lambda u: None)
+
+    def permissions_for(self, who):
+        if who is EVERYONE:
+            return types.SimpleNamespace(view_channel=self.public, send_messages=self.public, attach_files=False)
+        return types.SimpleNamespace(view_channel=True, send_messages=True, attach_files=self.can_attach, embed_links=True)
+
+
+CH[21], CH[22], CH[23] = AdminChannel(21), AdminChannel(22, public=True), AdminChannel(23, can_attach=False)
+check("the daily backup post is off by default", db.setting(G, "backup_channel") is None and G not in db.guilds_with_key("backup_channel"))
+i = inter(officer)
+run(B.config_show.callback(i))
+check("/config show says it's off", "Daily backup post:** off" in text(i), text(i))
+i = inter(officer)
+run(B.config_backupchannel.callback(i, CH[22]))
+check("a channel everyone can see is refused", db.setting(G, "backup_channel") is None and "seen by everyone" in text(i)
+      and "Nothing was changed" in text(i), text(i))
+i = inter(officer)
+run(B.config_backupchannel.callback(i, CH[23]))
+check("a channel where the bot can't attach files is refused", db.setting(G, "backup_channel") is None and "Attach Files" in text(i), text(i))
+i = inter(officer)
+run(B.config_backupchannel.callback(i, CH[21]))
+check("a private channel is accepted", db.setting(G, "backup_channel") == "21" and "within a minute" in text(i)
+      and i.response.sent[0][1].get("ephemeral") is True, text(i))
+i = inter(officer)
+run(B.config_show.callback(i))
+check("/config show names the channel", "Daily backup post:** <#21>" in text(i), text(i))
+
+# data from another server, which must never end up in this server's copy
+theirs = db.create_event(2, 99, "Their raid", "secret plans", int(time.time()) + 86400, 1, 2, 5, 18)
+db.set_signup(theirs, 880, "Stranger", "Rogue", "Subtlety", "dps", "in", None)
+db.upsert_character(880, "Stranger", "Rogue", "Subtlety", "dps", True)
+db.set_setting(2, "log_channel", "4242")
+db.cancel_event(db.create_event(2, 99, "Their cancelled", "", int(time.time()) + 86400, 1, 0, 0, 0), 1)
+mine = new_raid("Our raid")
+db.upsert_character(50, "Thrall", "Shaman", "Restoration", "healer", True)
+
+
+def posted_file(ch):
+    f = ch.sent[-1][1].get("file")
+    if f is None:
+        return None
+    out = tmp / f"posted-{len(ch.sent)}.db"
+    f.fp.seek(0)
+    out.write_bytes(f.fp.read())
+    return out
+
+
+day0 = datetime(2026, 11, 9, 22, 0, tzinfo=B.guild_tz(G))
+run(B._run_backuppost(int(day0.timestamp())))
+check("the first copy goes out straight away, even late in the day", len(CH[21].sent) == 1 and posted_file(CH[21]) is not None,
+      CH[21].sent)
+copy = posted_file(CH[21])
+check("the file is named after the day and the message warns it is private",
+      CH[21].sent[-1][1]["file"].filename == "raidbot-2026-11-09.db" and "keep this channel private" in CH[21].sent[-1][0][0])
+con = sqlite3.connect(copy)
+q = lambda sql: con.execute(sql).fetchall()  # noqa: E731
+check("the copy is a healthy database", con.execute("PRAGMA quick_check").fetchone()[0] == "ok")
+check("it holds this server's raids and signups", {r[0] for r in q("SELECT title FROM events")} >= {"Our raid"}
+      and q(f"SELECT user_id FROM signups WHERE event_id={mine}"))
+check("it holds no other server's raids, signups, settings or cancelled raids",
+      q("SELECT COUNT(*) FROM events WHERE guild_id != 1")[0][0] == 0 and q("SELECT COUNT(*) FROM signups WHERE user_id=880")[0][0] == 0
+      and q("SELECT COUNT(*) FROM settings WHERE guild_id != 1")[0][0] == 0
+      and q("SELECT COUNT(*) FROM cancelled_events WHERE guild_id != 1")[0][0] == 0)
+check("it keeps characters of this server's players, not of strangers",
+      q("SELECT COUNT(*) FROM characters WHERE user_id=50")[0][0] == 1 and q("SELECT COUNT(*) FROM characters WHERE user_id=880")[0][0] == 0)
+con.close()
+raw = copy.read_bytes()
+check("nothing deleted is left behind in the file", b"secret plans" not in raw and b"Stranger" not in raw and b"Their raid" not in raw)
+check("the live database is untouched", db.event(theirs) is not None and db.characters(880))
+
+run(B._run_backuppost(int(day0.timestamp()) + 3600))
+check("only one copy a day", len(CH[21].sent) == 1)
+run(B._run_backuppost(int((day0 + timedelta(hours=5)).timestamp())))  # 03:00 the next day
+check("the next day's copy waits until 04:00 server time", len(CH[21].sent) == 1)
+run(B._run_backuppost(int((day0 + timedelta(hours=6, minutes=1)).timestamp())))
+check("and goes out after it", len(CH[21].sent) == 2 and CH[21].sent[-1][1]["file"].filename == "raidbot-2026-11-10.db")
+for n in range(2, 9):
+    run(B._run_backuppost(int((day0 + timedelta(days=n, hours=6, minutes=1)).timestamp())))
+check("only the newest 7 posts are kept, older ones are deleted", len(CH[21].sent) == 9
+      and len(db.setting(G, "backup_posts").split(",")) == 7 and len(CH[21].deleted) == 2, (db.setting(G, "backup_posts"), CH[21].deleted))
+
+CH[21].public = True  # someone made the channel public after it was chosen
+run(B._run_backuppost(int((day0 + timedelta(days=9, hours=6, minutes=1)).timestamp())))
+check("a channel that became public gets no file, and /status hears why",
+      len(CH[21].sent) == 9 and B.LAST_ERROR and "seen by everyone" in B.LAST_ERROR[1], B.LAST_ERROR)
+CH[21].public = False
+CH[21].fail_send = discord.HTTPException(types.SimpleNamespace(status=500, reason="x"), "down")
+run(B._run_backuppost(int((day0 + timedelta(days=10, hours=6, minutes=1)).timestamp())))
+check("a failed post is tried again next minute", db.setting(G, "backup_post_last") != "2026-11-20")
+CH[21].fail_send = None
+run(B._run_backuppost(int((day0 + timedelta(days=10, hours=6, minutes=2)).timestamp())))
+check("and goes out once Discord is back", len(CH[21].sent) == 10 and db.setting(G, "backup_post_last") == "2026-11-20")
+
+i = inter(officer)
+run(B.config_backupchannel.callback(i, None))
+check("leaving the channel empty turns it off", db.setting(G, "backup_channel") is None and "No more daily backup posts" in text(i))
+run(B._run_backuppost(int((day0 + timedelta(days=11, hours=6, minutes=1)).timestamp())))
+check("and nothing more is posted", len(CH[21].sent) == 10)
 
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

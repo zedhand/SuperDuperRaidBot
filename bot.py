@@ -1918,6 +1918,80 @@ async def _run_digest(now: int) -> None:
             db.set_setting(g, "digest_last", week)
 
 
+BACKUP_POST_HOUR = 4  # the daily backup post goes out at the first check after 04:00 server time
+BACKUP_POSTS_KEPT = 7  # older backup posts are deleted, like the backups folder
+BACKUP_POST_MAX = 8 * 1024 * 1024  # Discord's upload limit for bots, with room to spare
+
+
+def backup_channel_problem(channel) -> Optional[str]:
+    """Why this channel can't take the daily backup post, or None if it can. Everyone in the server being able
+    to see it is a problem: the file holds members' Discord IDs."""
+    guild = channel.guild
+    if channel.permissions_for(guild.default_role).view_channel:
+        return (f"{channel.mention} can be seen by everyone in the server. The backup holds your members' Discord IDs, "
+                "so pick a channel only admins can see (turn off View Channel for @everyone).")
+    mine = channel.permissions_for(guild.me)
+    missing = [name for name, ok in (("View Channel", mine.view_channel), ("Send Messages", mine.send_messages),
+                                     ("Attach Files", mine.attach_files)) if not ok]
+    if missing:
+        return f"I need {', '.join(missing)} in {channel.mention} to post the backup there."
+    return None
+
+
+async def _backup_post_one(guild_id: int, day: str):
+    """The optional daily backup post (/config backupchannel): a copy of this server's data, as a file."""
+    channel = bot.get_channel(int_setting(guild_id, "backup_channel"))
+    if channel is None:
+        return True  # channel deleted or out of reach: skip today, /status and the folder backups still work
+    problem = backup_channel_problem(channel)
+    if problem:  # e.g. the channel was made public after it was chosen: never post the file then
+        log.warning("Daily backup post skipped for guild %s: %s", guild_id, problem)
+        note_error(f"daily backup post skipped: {problem}")
+        return True
+    with tempfile.TemporaryDirectory() as folder:
+        path = Path(folder) / f"raidbot-{day}.db"
+        db.snapshot_for_guild(path, guild_id)
+        size = path.stat().st_size
+        try:
+            if size > BACKUP_POST_MAX:
+                msg = await channel.send(f"🗄️ Daily backup for {day}: the database is {size // 1024 // 1024} MB, too big "
+                                         "to attach. The bot's `backups` folder still has a copy.")
+            else:
+                msg = await channel.send(
+                    f"🗄️ Daily backup for {day}: this server's raids, signups, characters and settings. It holds members' "
+                    "Discord IDs, so keep this channel private. To restore, stop the bot and put this file in place of "
+                    "`raidbot.db` (it only holds this server's data, so if the bot runs in other servers too, use the "
+                    "`backups` folder instead).",
+                    file=discord.File(io.BytesIO(path.read_bytes()), filename=path.name))
+        except discord.HTTPException as err:
+            log.warning("Daily backup post failed for guild %s: %s", guild_id, err)
+            return False
+    posts = [p for p in (db.setting(guild_id, "backup_posts") or "").split(",") if p] + [f"{channel.id}:{msg.id}"]
+    for old in posts[:-BACKUP_POSTS_KEPT]:  # keep the newest few, like the backups folder
+        cid, mid = (int(x) for x in old.split(":"))
+        old_channel = bot.get_channel(cid)
+        try:
+            if old_channel is not None:
+                await old_channel.get_partial_message(mid).delete()
+        except discord.NotFound:
+            pass
+        except discord.HTTPException as err:
+            log.warning("Couldn't delete an old backup post in guild %s: %s", guild_id, err)
+    db.set_setting(guild_id, "backup_posts", ",".join(posts[-BACKUP_POSTS_KEPT:]))
+    return True
+
+
+async def _run_backuppost(now: int) -> None:
+    for g in db.guilds_with_key("backup_channel"):
+        local = datetime.fromtimestamp(now, guild_tz(g))
+        day = local.date().isoformat()
+        last = db.setting(g, "backup_post_last")
+        if last == day or (last and local.hour < BACKUP_POST_HOUR):
+            continue  # already posted today, or before 04:00 (the very first copy goes out straight away)
+        if await _attempt("backuppost", g, partial(_backup_post_one, g, day)):
+            db.set_setting(g, "backup_post_last", day)
+
+
 async def _run_locks(now: int) -> None:
     for event in db.due_lock(now):  # start time passed: show "This event is closed."
         if await _attempt("lock", event["id"], partial(refresh_message, event["id"])):
@@ -1952,7 +2026,7 @@ async def _run_nudges(now: int) -> None:
 async def reminder_loop():
     now = int(time.time())
     for step in (_run_autoclose, _run_locks, _run_voicecheck, _run_repeats, _run_archive, _run_reminders, _run_nudges,
-                 _run_digest, _run_updatecheck):
+                 _run_digest, _run_backuppost, _run_updatecheck):
         try:
             await step(now)
         except Exception as e:  # e.g. a database error: log it, and still run the other steps
@@ -2504,6 +2578,8 @@ async def config_show(interaction: discord.Interaction):
     lines.append(f"**Missing-utility warnings:** {'on' if db.setting(g, 'buffs') == '1' else 'off'}")
     lines.append(f"**Weekly attendance digest:** {'on' if db.setting(g, 'digest') == '1' else 'off'}")
     lines.append(f"**Ask before cancel / remove:** {'on' if db.setting(g, 'confirm_deletes') == '1' else 'off'}")
+    backup_ch = db.setting(g, "backup_channel")
+    lines.append(f"**Daily backup post:** {f'<#{backup_ch}>' if backup_ch else 'off'}")
     nudge = int(db.setting(g, "nudge_hours", 0))
     nudge_text = f"{plural(nudge, 'hour')} before" if nudge else "off"
     lines.append(f"**Unanswered reminder:** {nudge_text}")
@@ -2740,6 +2816,28 @@ async def config_backup(interaction: discord.Interaction):
             "Here is a copy of the database (characters, raids, signups, settings). It contains your members' "
             "Discord IDs, so keep it private. To restore it, stop the bot and replace `raidbot.db` with this file.",
             file=discord.File(io.BytesIO(path.read_bytes()), filename=path.name), ephemeral=True)
+
+
+@config.command(name="backupchannel", description="Post a copy of this server's data in a private admin channel every day (off by default)")
+@app_commands.describe(channel="A channel only admins can see. Leave empty to turn it off")
+async def config_backupchannel(interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None):
+    g = interaction.guild_id
+    if channel is None:
+        db.set_setting(g, "backup_channel", None)
+        return await interaction.response.send_message(
+            "No more daily backup posts. Copies already posted stay until you delete them, and the bot still keeps "
+            "7 daily copies in its `backups` folder.", ephemeral=True)
+    problem = backup_channel_problem(channel)
+    if problem:
+        return await interaction.response.send_message(problem + " Nothing was changed.", ephemeral=True,
+                                                       allowed_mentions=discord.AllowedMentions.none())
+    db.set_setting(g, "backup_channel", channel.id)
+    db.set_setting(g, "backup_post_last", None)  # so the first copy goes out within a minute
+    await interaction.response.send_message(
+        f"Every day after {BACKUP_POST_HOUR:02d}:00 (server time) I'll post a copy of this server's data in "
+        f"{channel.mention}, starting within a minute; the newest {BACKUP_POSTS_KEPT} are kept. Anyone who can read that "
+        "channel can download your members' Discord IDs, so keep it to admins.", ephemeral=True,
+        allowed_mentions=discord.AllowedMentions.none())
 
 
 @config.command(name="timezone", description="Timezone used when typing raid dates")

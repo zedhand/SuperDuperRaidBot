@@ -16,7 +16,7 @@ Everything below is optional and off by default unless noted. One release (v1.14
 | 2 | Release automation (tag builds, scans and attaches the zip) and Dependabot | One-click releases, free security upkeep | M | Done (on the v1.13 branch) |
 | 3 | Optional confirm before `/raid cancel` and `/raid remove` (`/config confirm`), plus undo for cancel (`/raid restore`, 14 days) | One mistyped ID currently deletes a raid and its signups for good | S-M | Done (on the v1.13 branch) |
 | 4 | `/forgetme`: a player deletes their own characters and signup history | Privacy, nearly free | S | Done (on the v1.13 branch) |
-| 5 | Daily backup sent to a private admin channel (`/config backupchannel`) | Backups sit on the same PC as the bot | M | Planned |
+| 5 | Daily backup sent to a private admin channel (`/config backupchannel`) | Backups sit on the same PC as the bot | M | Done (on the v1.13 branch) |
 
 ### v1.14 "convenience"
 | # | Feature | Why | Effort | Status |

@@ -583,6 +583,39 @@ class DB:
             old.unlink(missing_ok=True)
         return target
 
+    def guilds_with_key(self, key):
+        """Every server that has this setting at all, whatever its value."""
+        return [r["guild_id"] for r in self._all("SELECT guild_id FROM settings WHERE key=?", (key,))]
+
+    def snapshot_for_guild(self, dest_path, guild_id) -> None:
+        """Write a copy of the database that holds only one server's data (for the daily backup post).
+        Other servers' raids, signups, templates, settings and cancelled raids are taken out, and only the
+        characters of players who appear in this server are kept. Any table this code doesn't know about is
+        dropped rather than risk leaking it. The copy is then VACUUMed so nothing deleted is left in the file."""
+        self.snapshot_to(dest_path)
+        con = sqlite3.connect(dest_path)
+        try:
+            tables = [r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")]
+            for table in tables:
+                columns = {r[1] for r in con.execute(f'PRAGMA table_info("{table}")')}
+                if "guild_id" in columns:
+                    con.execute(f'DELETE FROM "{table}" WHERE guild_id != ?', (guild_id,))  # nosec B608 (names come from sqlite_master)
+                elif table == "signups":
+                    con.execute("DELETE FROM signups WHERE event_id NOT IN (SELECT id FROM events)")
+                elif table != "characters":
+                    con.execute(f'DROP TABLE "{table}"')  # nosec B608 (an unknown table is dropped, not shared)
+            players = {r[0] for r in con.execute("SELECT user_id FROM signups UNION SELECT user_id FROM series_signups")}
+            for (raw,) in con.execute("SELECT signups_json FROM cancelled_events").fetchall():
+                players.update(s.get("user_id") for s in json.loads(raw or "[]"))
+            con.execute("CREATE TEMP TABLE keep_players(user_id INTEGER PRIMARY KEY)")
+            con.executemany("INSERT OR IGNORE INTO keep_players VALUES(?)", [(u,) for u in players if u is not None])
+            con.execute("DELETE FROM characters WHERE user_id NOT IN (SELECT user_id FROM keep_players)")
+            con.execute("DROP TABLE keep_players")
+            con.commit()
+            con.execute("VACUUM")
+        finally:
+            con.close()
+
     def snapshot_to(self, dest_path) -> None:
         """Write a consistent copy of the live database to dest_path (for /config backup)."""
         dest = sqlite3.connect(dest_path)

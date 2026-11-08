@@ -1,5 +1,5 @@
 """Offline tests for v1.13/v1.14: the WoW version presets, confirm/undo for /raid cancel and /raid remove, /forgetme,
-the daily backup post, realms on characters, signup notes, the Spec button and /raid promote (more suites are added below as features land).
+the daily backup post, realms on characters, signup notes, the Spec button, /raid promote and the invite export in /raid roster (more suites are added below as features land).
 
 Run:  python -I tests/test_v113.py        (or python tests/run_all.py for every suite)
 """
@@ -912,6 +912,51 @@ db.set_signup(pr, 708, "Late", "Druid", "Balance", "dps", "bench", None)
 i = inter(officer)
 run(B.raid_promote.callback(i, pr, member(708), True))
 check("a raid that has started can't be changed", "already started" in text(i) and db.signup(pr, 708)["status"] == "bench")
+
+print("/raid roster invites: Name-Realm lines to paste into WoW")
+iv = db.create_event(G, 11, "Invite night", "", int(time.time()) + 86400, 1, 0, 0, 0)
+db.upsert_character(800, "Thrall", "Shaman", "Enhancement", "dps", True, "Area 52")
+db.set_signup(iv, 800, "Thrall", "Shaman", "Enhancement", "dps", "in", None)
+db.set_signup(iv, 801, "Homey", "Mage", "Frost", "dps", "late", None)          # no saved realm
+db.upsert_character(802, "Kael", "Priest", "Holy", "healer", True, "Kel'Thuzad")
+db.set_signup(iv, 802, "Kael", "Priest", "Holy", "healer", "in", None)
+db.set_signup(iv, 803, "Benched", "Rogue", "Subtlety", "dps", "bench", None)
+db.set_signup(iv, 804, "Maybe", "Warrior", "Arms", "dps", "tentative", None)
+db.set_signup(iv, 805, None, None, None, None, "in", None)                      # in without a character
+db.set_signup(iv, 806, "Ghost", "Druid", "Balance", "dps", "in", None)
+db.set_no_show(iv, 806, True)
+
+i = inter(officer)
+run(B.raid_roster.callback(i, iv))
+check("without invites the roster is unchanged", "/invite" not in text(i) and "Invite night" in text(i), text(i))
+i = inter(officer)
+run(B.raid_roster.callback(i, iv, True))
+t = text(i)
+check("invites lists everyone in or late, privately", "/invite Thrall-Area52" in t and "/invite Homey\n" in t
+      and i.response.sent[0][1].get("ephemeral") is True, t)
+check("the realm keeps its apostrophe and loses its spaces", "/invite Kael-Kel'Thuzad" in t, t)
+check("bench, tentative and no-shows are left out", "Benched" not in t and "Maybe" not in t and "Ghost" not in t, t)
+check("the count says how many, and someone without a character is mentioned", "3 to invite" in t
+      and "1 signed up without a character" in t, t)
+check("names inside a code block", "```\n/invite" in t, t)
+
+big = db.create_event(G, 11, "Big night", "", int(time.time()) + 86400, 1, 0, 0, 0)
+for n in range(40):
+    db.upsert_character(900 + n, f"Player{n:02d}", "Mage", "Frost", "dps", True, "Twisting Nether")
+    db.set_signup(big, 900 + n, f"Player{n:02d}", "Mage", "Frost", "dps", "in", None)
+i = inter(officer)
+run(B.raid_roster.callback(i, big, True))
+t = text(i)
+blocks = t.split("```\n", 1)[1].rsplit("\n```", 1)[0].split("\n\n")
+check("forty players fit in one message", len(t) <= 2000 and "/invite Player39-TwistingNether" in t, len(t))
+check("each block fits in one WoW macro (255 characters)", len(blocks) > 1 and all(len(b) <= 255 for b in blocks),
+      [len(b) for b in blocks])
+check("invite_name without a realm is just the name", B.invite_name("Solo", None) == "Solo" and B.invite_name("Solo", "  ") == "Solo")
+
+empty = db.create_event(G, 11, "Empty night", "", int(time.time()) + 86400, 1, 0, 0, 0)
+i = inter(officer)
+run(B.raid_roster.callback(i, empty, True))
+check("nobody in yet: a plain sentence, no empty block", "nobody to invite" in text(i) and "```" not in text(i), text(i))
 
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

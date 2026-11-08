@@ -1622,12 +1622,15 @@ async def raid_promote(interaction: discord.Interaction, event_id: int, member: 
 
 
 @raid.command(name="roster", description="Private, copy-friendly list of who is coming")
+@app_commands.describe(invites="True = /invite Name-Realm lines for everyone who is in, to paste into WoW")
 @app_commands.autocomplete(event_id=event_autocomplete)
-async def raid_roster(interaction: discord.Interaction, event_id: int):
+async def raid_roster(interaction: discord.Interaction, event_id: int, invites: bool = False):
     event = await _get_event(interaction, event_id)
     if not event:
         return await interaction.response.send_message("Event not found.", ephemeral=True)
     signups = db.signups(event_id)
+    if invites:
+        return await interaction.response.send_message(invite_export(event, signups), ephemeral=True)
     groups = {g: [] for g in wd.GROUPS}
     for x in signups:
         if x["status"] in ("in", "late") and x["char_name"] and not x["no_show"]:  # no-shows aren't "coming"
@@ -1649,11 +1652,44 @@ async def raid_roster(interaction: discord.Interaction, event_id: int):
     await interaction.response.send_message(_clip_block(lines), ephemeral=True)
 
 
-def _clip_block(lines: list[str]) -> str:
-    """The roster as one code block, cut to fit in a Discord message (2000 characters)."""
+MACRO_LIMIT = 255  # characters in one WoW macro
+
+
+def invite_name(name: str, realm: str | None) -> str:
+    """How WoW wants a name for /invite: Name-Realm, with the spaces taken out of the realm ("Area 52" -> "Area52")."""
+    realm = "".join((realm or "").split())
+    return f"{name}-{realm}" if realm else name
+
+
+def invite_export(event, signups) -> str:
+    """/raid roster invites: one /invite line per player who is in (or late), grouped into blocks that each fit in a
+    WoW macro. The realm comes from the saved character (always, not only with /config realms), so players from
+    another realm get the Name-Realm form that WoW needs."""
+    coming = [x for x in signups if x["status"] in ("in", "late") and x["char_name"] and not x["no_show"]]
+    missing = sum(1 for x in signups if x["status"] in ("in", "late") and not x["char_name"] and not x["no_show"])
+    if not coming:
+        return f"Nobody with a character is in for **{event['title']}** yet, so there's nobody to invite."
+    realms = db.realms_for(coming)
+    lines, size = [], 0
+    for x in coming:
+        line = f"/invite {invite_name(x['char_name'], realms.get(x['user_id']))}"
+        if lines and size + len(line) + 1 > MACRO_LIMIT:
+            lines.append("")  # a blank line starts the next macro-sized block
+            size = 0
+        lines.append(line)
+        size += len(line) + 1
+    text = (f"**{event['title']}**: {len(coming)} to invite. Paste a line into WoW chat, or each block into its own "
+            "macro (a macro holds 255 characters).")
+    if missing:
+        text += f" {missing} signed up without a character, so they aren't listed."
+    return text + "\n" + _clip_block(lines, 1980 - len(text))
+
+
+def _clip_block(lines: list[str], room: int = 1980) -> str:
+    """The roster as one code block, cut to fit in a Discord message (2000 characters, or `room` for the block)."""
     body = "\n".join(lines)
-    if len(body) > 1980:
-        body = body[:1970].rsplit("\n", 1)[0] + "\n…"
+    if len(body) > room:
+        body = body[:room - 10].rsplit("\n", 1)[0] + "\n…"
     return "```\n" + body + "\n```"
 
 
@@ -3194,7 +3230,7 @@ async def help_command(interaction: discord.Interaction):
     embed.add_field(name="Officers", inline=False, value=(
         "`/raid create` post a raid (optionally ping a role)\n"
         "`/raid edit` change title, time, description or limits\n"
-        "`/raid roster` copy-friendly list of who is coming\n"
+        "`/raid roster` copy-friendly list of who is coming (`invites: True` for /invite lines)\n"
         "`/raid copy` same raid, new date · `/raid repeat` weekly or every 2 weeks\n"
         "`/raid template save|list|delete` saved setups, then `/raid create template:`\n"
         "`/raid noshow` mark someone who didn't turn up · `/stats team` everyone's attendance · `/stats export` as a spreadsheet\n"

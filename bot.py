@@ -1475,18 +1475,19 @@ async def raid_close(interaction: discord.Interaction, event_id: int):
 
 
 class ConfirmView(discord.ui.View):
-    """Private "are you sure?" buttons for a step that deletes something. Only the person who ran the command sees
-    them (the reply is ephemeral). No answer within a minute means nothing happens."""
+    """Private "are you sure?" buttons for a step that deletes something (/config confirm turns them on for officers'
+    deletes, off by default; /forgetme always asks). Only the person who ran the command sees them (the reply is
+    ephemeral). No answer within a minute means nothing happens."""
 
     def __init__(self, interaction: discord.Interaction, confirm_label: str, action):
         super().__init__(timeout=60)
-        self.interaction, self.action = interaction, action  # action(click) does the work and replies to the click
+        self.interaction, self.action = interaction, action  # action(click, reply) does the work, reply(text) answers
         self.yes.label = confirm_label
 
     @discord.ui.button(label="Yes", style=discord.ButtonStyle.danger)
     async def yes(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.stop()
-        await self.action(interaction)
+        await self.action(interaction, lambda text: interaction.response.edit_message(content=text, view=None))
 
     @discord.ui.button(label="No, keep it", style=discord.ButtonStyle.secondary)
     async def no(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1500,13 +1501,23 @@ class ConfirmView(discord.ui.View):
             pass
 
 
+async def confirm_then(interaction: discord.Interaction, question: str, label: str, action) -> None:
+    """Ask first if /config confirm is on, otherwise do it straight away. `action(interaction, reply)` does the work;
+    `reply(text)` answers privately either way."""
+    if db.setting(interaction.guild_id, "confirm_deletes", "0") != "1":
+        return await action(interaction, lambda text: interaction.response.send_message(
+            text, ephemeral=True, allowed_mentions=discord.AllowedMentions.none()))
+    await interaction.response.send_message(question, view=ConfirmView(interaction, label, action), ephemeral=True,
+                                            allowed_mentions=discord.AllowedMentions.none())
+
+
 def _signup_count(event_id: int) -> str:
     rows = db.signups(event_id)
     coming = sum(1 for r in rows if r["status"] in ("in", "late"))
     return f"{plural(len(rows), 'signup')} ({coming} coming)" if rows else "no signups"
 
 
-@raid.command(name="cancel", description="Delete an event and its post (asks first; /raid restore undoes it)")
+@raid.command(name="cancel", description="Delete an event and its post (/raid restore undoes it)")
 @app_commands.autocomplete(event_id=event_autocomplete)
 async def raid_cancel(interaction: discord.Interaction, event_id: int):
     event = await _get_event(interaction, event_id)
@@ -1514,21 +1525,19 @@ async def raid_cancel(interaction: discord.Interaction, event_id: int):
         return await interaction.response.send_message("Event not found.", ephemeral=True)
     when = f"<t:{event['start_ts']}:f>"
 
-    async def do_cancel(click: discord.Interaction):
+    async def do_cancel(click: discord.Interaction, reply):
         current = db.event(event_id)
         if not current:
-            return await click.response.edit_message(content=f"Event #{event_id} is already gone.", view=None)
+            return await reply(f"Event #{event_id} is already gone.")
         db.cancel_event(event_id, click.user.id)
-        await click.response.edit_message(
-            content=f"Event #{event_id} (**{current['title']}**) cancelled. Changed your mind? "
-                    f"`/raid restore` brings it back with its signups for the next {KEEP_CANCELLED_DAYS} days.",
-            view=None)
+        await reply(f"Event #{event_id} (**{current['title']}**) cancelled. Changed your mind? "
+                    f"`/raid restore` brings it back with its signups for the next {KEEP_CANCELLED_DAYS} days.")
         await delete_event_post(current)
         await audit(click.guild_id, f"🗑️ {click.user.mention} cancelled **{current['title']}** (#{event_id})")
 
-    await interaction.response.send_message(
-        f"Cancel **{event['title']}** ({when}, #{event_id})? Its post goes away and it has {_signup_count(event_id)}.",
-        view=ConfirmView(interaction, "Yes, cancel it", do_cancel), ephemeral=True)
+    await confirm_then(
+        interaction, f"Cancel **{event['title']}** ({when}, #{event_id})? Its post goes away and it has "
+                     f"{_signup_count(event_id)}.", "Yes, cancel it", do_cancel)
 
 
 async def cancelled_autocomplete(interaction: discord.Interaction, current: str):
@@ -1586,7 +1595,7 @@ async def raid_restore(interaction: discord.Interaction, event_id: int):
         ephemeral=True)  # signups come back exactly as they were, so nobody is promoted or messaged here
 
 
-@raid.command(name="remove", description="Remove a member's signup (asks first)")
+@raid.command(name="remove", description="Remove a member's signup")
 @app_commands.autocomplete(event_id=event_autocomplete)
 async def raid_remove(interaction: discord.Interaction, event_id: int, member: discord.Member):
     event = await _get_event(interaction, event_id)
@@ -1599,16 +1608,14 @@ async def raid_remove(interaction: discord.Interaction, event_id: int, member: d
             ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
     what = f"{row['char_name']}, {row['status']}" if row["char_name"] else row["status"]
 
-    async def do_remove(click: discord.Interaction):
+    async def do_remove(click: discord.Interaction, reply):
         db.remove_signup(event_id, member.id)
-        await click.response.edit_message(content=f"Removed {member.mention} from event #{event_id}.", view=None)
+        await reply(f"Removed {member.mention} from event #{event_id}.")
         await audit(click.guild_id, f"🚫 {click.user.mention} removed {member.mention} from #{event_id}")
         await update_event(event_id)
 
-    await interaction.response.send_message(
-        f"Remove {member.mention} ({what}) from **{event['title']}** (#{event_id})?",
-        view=ConfirmView(interaction, "Yes, remove", do_remove), ephemeral=True,
-        allowed_mentions=discord.AllowedMentions.none())
+    await confirm_then(interaction, f"Remove {member.mention} ({what}) from **{event['title']}** (#{event_id})?",
+                       "Yes, remove", do_remove)
 
 
 @raid.command(name="unsigned", description="List members of a role who haven't responded")
@@ -2119,16 +2126,15 @@ async def forgetme(interaction: discord.Interaction):
     if not any(counts.values()):
         return await interaction.response.send_message("The bot has nothing stored about you.", ephemeral=True)
 
-    async def do_forget(click: discord.Interaction):
+    async def do_forget(click: discord.Interaction, reply):
         counts, event_ids = db.forget_user(click.user.id)
-        await click.response.edit_message(
-            content=f"Done. Deleted {_forget_summary(counts)}. The bot no longer has anything stored about you.",
-            view=None)
+        await reply(f"Done. Deleted {_forget_summary(counts)}. The bot no longer has anything stored about you.")
         for event_id in event_ids:  # take their name off the posts, and move someone off the bench if a slot opened
             event = db.event(event_id)
             if event and event["message_id"] and not event["archived"]:
                 await update_event(event_id)
 
+    # Always asks, whatever /config confirm says: the player can't get this back.
     await interaction.response.send_message(
         f"Delete everything the bot stores about you, in every server it's in? That's {_forget_summary(counts)}. "
         "Your attendance history goes with your signups and your name comes off the raid posts. "
@@ -2470,6 +2476,7 @@ class SetupView(discord.ui.View):
         self._toggle("buffs", "Utility warnings")
         self._toggle("digest", "Weekly digest")
         self._toggle("update_notice", "Update notice")
+        self._toggle("confirm_deletes", "Confirm deletes")
         if wd.PRESET_NAME == "retail":
             self._toggle("raiderio", "Raider.IO import")
         self._back(1)
@@ -2496,6 +2503,7 @@ async def config_show(interaction: discord.Interaction):
     lines.append(f"**Voice attendance check:** {voice_text}")
     lines.append(f"**Missing-utility warnings:** {'on' if db.setting(g, 'buffs') == '1' else 'off'}")
     lines.append(f"**Weekly attendance digest:** {'on' if db.setting(g, 'digest') == '1' else 'off'}")
+    lines.append(f"**Ask before cancel / remove:** {'on' if db.setting(g, 'confirm_deletes') == '1' else 'off'}")
     nudge = int(db.setting(g, "nudge_hours", 0))
     nudge_text = f"{plural(nudge, 'hour')} before" if nudge else "off"
     lines.append(f"**Unanswered reminder:** {nudge_text}")
@@ -2682,6 +2690,16 @@ async def config_raiderio(interaction: discord.Interaction, on: bool, region: Op
         "(nothing else, no accounts)." + shown if on else "`/character import` is off.", ephemeral=True)
 
 
+@config.command(name="confirm", description="Ask \"are you sure?\" before /raid cancel and /raid remove (off by default)")
+@app_commands.describe(on="True = officers get a private Yes / No question first")
+async def config_confirm(interaction: discord.Interaction, on: bool):
+    db.set_setting(interaction.guild_id, "confirm_deletes", "1" if on else "0")
+    await interaction.response.send_message(
+        "`/raid cancel` and `/raid remove` will ask first." if on else
+        "`/raid cancel` and `/raid remove` act straight away. A cancelled raid can still be brought back with "
+        f"`/raid restore` for {KEEP_CANCELLED_DAYS} days.", ephemeral=True)
+
+
 @config.command(name="updatenotice", description="Say in the log channel when a newer version of the bot is released (off by default)")
 @app_commands.describe(on="True = check GitHub about once a day. It sends no information about your server")
 async def config_updatenotice(interaction: discord.Interaction, on: bool):
@@ -2791,7 +2809,7 @@ async def help_command(interaction: discord.Interaction):
         "`/config raiderrole` only that role can sign up · `/config autoclose` close sign-ups before the start\n"
         "`/config voicechannel` automatic no-shows from a voice channel · `/config buffs` warn about missing Bloodlust / battle res\n"
         "`/config digest` weekly attendance summary. Officers can also limit classes: `/raid create classes: Mage 4`\n"
-        "`/config setup` guided panel for the main settings · `/config raiderio` · `/config updatenotice`\n"
+        "`/config setup` guided panel for the main settings · `/config raiderio` · `/config updatenotice` · `/config confirm`\n"
         "`/config backup` get a copy of the database · `/status` bot health check"))
     embed.set_footer(text="Anyone on the bench is moved in automatically when a slot opens.")
     await interaction.response.send_message(embed=embed, ephemeral=True)

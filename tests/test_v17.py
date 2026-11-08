@@ -152,14 +152,6 @@ def inter(user, ch=None, **wire_kw):
                                  response=FakeResp(), followup=fu, sent=sent, command=None)
 
 
-def confirm(i, user=None):
-    """Press the "Yes" button on the private confirmation /raid cancel and /raid remove ask for (since v1.13)."""
-    view = i.response.sent[0][1]["view"]
-    yes = next(c for c in view.children if c.label.startswith("Yes"))
-    click = inter(user or i.user)
-    run(yes.callback(click))
-    return click
-
 
 admin = member(admin=True)
 pleb = member()
@@ -353,7 +345,7 @@ print("/raid cancel removes the thread")
 c1 = db.create_event(G, 11, "Cancel me", "", now + 9999, 1, 0, 0, 0)
 db.set_message_id(c1, 78); db.update_event(c1, thread_id=888)
 deleted.clear()
-i = inter(admin); run(B.raid_cancel.callback(i, c1)); confirm(i)
+i = inter(admin); run(B.raid_cancel.callback(i, c1))
 check("event gone, thread deleted", db.event(c1) is None and deleted == ["thread"])
 
 # ---------------------------------------------------------------- config + template commands

@@ -183,6 +183,11 @@ def notes_mode(guild_id: int) -> str:
     return "post" if db.setting(guild_id, "notes_on_post") == "1" else "officers"
 
 
+def spec_switch_on(guild_id: int) -> bool:
+    """/config specswitch: show a Spec button on raid posts (off by default)."""
+    return db.setting(guild_id, "spec_switch") == "1"
+
+
 def render_embed(event, signups, locked: bool):
     """The raid post, with the optional missing-utility warnings if /config buffs is on, realms after the
     character names if /config realms is on, and players' notes if /config notes shows them on the post."""
@@ -303,6 +308,13 @@ async def audit(guild_id: int, text: str) -> None:
         pass
 
 
+async def redraw_open_posts(guild_id: int) -> None:
+    """Redraw a server's upcoming raid posts, after a setting that changes how they look."""
+    for upcoming in db.upcoming_events(guild_id, int(time.time()))[:25]:
+        if upcoming["message_id"]:
+            await refresh_message(upcoming["id"])
+
+
 async def update_event(event_id: int) -> None:
     """After any roster change: promote benched players if there is room, then redraw the post."""
     await promote_bench(event_id)
@@ -348,7 +360,7 @@ async def _redraw(event_id: int) -> bool:
     embed = render_embed(event, db.signups(event_id), locked)
     try:
         await channel.get_partial_message(event["message_id"]).edit(
-            embed=embed, view=ClosedView() if locked else RaidView())
+            embed=embed, view=ClosedView() if locked else RaidView(spec_switch_on(event["guild_id"])))
     except discord.NotFound:
         return True  # the post was deleted by hand
     except discord.HTTPException as e:
@@ -463,6 +475,55 @@ class CharacterPickView(discord.ui.View):
         self.add_item(ClassSelect(event_id))
 
 
+class SpecSwitchSelect(discord.ui.Select):
+    """The Spec button's picker: the other specs of the class someone signed up with."""
+
+    def __init__(self, event_id: int, cls: str, specs: list[str]):
+        self.event_id, self.cls = event_id, cls
+        super().__init__(placeholder="Pick your new spec…", options=[
+            discord.SelectOption(label=s, description=wd.GROUP_LABEL[wd.DATA[cls][s]], emoji=wd.GROUP_ICON[wd.DATA[cls][s]])
+            for s in specs[:25]])
+
+    async def callback(self, interaction: discord.Interaction):
+        await change_spec(interaction, self.event_id, self.cls, self.values[0])
+
+
+async def change_spec(interaction: discord.Interaction, event_id: int, cls: str, spec: str):
+    """Change the spec (and so maybe the role) of someone's signup, keeping their character, status and note.
+    Someone who is in or late, or waiting on the bench for a full slot, is checked against the new role's limit
+    again: they may move in, or onto the bench. A bench or tentative choice of their own stays as it was."""
+    event = db.event(event_id)
+    if not event or is_locked(event):
+        return await interaction.response.edit_message(content="Signups are closed.", view=None)
+    uid = interaction.user.id
+    current = db.signup(event_id, uid)
+    if not current or current["wow_class"] != cls or current["status"] == "absent":
+        return await interaction.response.edit_message(
+            content="Your signup changed in the meantime. Press **Spec** again.", view=None)
+    role = wd.role_for(cls, spec)
+    wanted = current["bench_from"] or current["status"]  # an auto-benched player still wants their slot
+    if wanted in ("in", "late"):
+        status, bench_from = apply_cap(event, uid, role, wanted, cls)
+    else:
+        status, bench_from = current["status"], None
+    db.set_signup(event_id, uid, current["char_name"], cls, spec, role, status, bench_from)
+    if status == "bench" and bench_from:
+        extra = f" {bench_reason(event, uid, role, cls)}, so you're on the bench.{queue_note(event_id, uid)}"
+    elif current["status"] == "bench" and current["bench_from"]:
+        extra = f" There was room, so you're **{status}** now."
+    else:
+        extra = ""
+    await interaction.response.edit_message(
+        content=f"Switched to **{spec}** {cls} ({wd.ROLE_LABEL[role]}).{extra}", view=None)
+    await update_event(event_id)
+
+
+class SpecSwitchView(discord.ui.View):
+    def __init__(self, event_id: int, cls: str, specs: list[str]):
+        super().__init__(timeout=120)
+        self.add_item(SpecSwitchSelect(event_id, cls, specs))
+
+
 class ClosedView(discord.ui.View):
     """Replaces the buttons with a greyed-out bar once an event is closed."""
 
@@ -473,10 +534,15 @@ class ClosedView(discord.ui.View):
 
 
 class RaidView(discord.ui.View):
-    """Persistent buttons under every raid post. Event is found via the message id."""
+    """Persistent buttons under every raid post. Event is found via the message id.
 
-    def __init__(self):
+    spec_button: also show the Spec button (/config specswitch). The view registered at startup has it, so clicks on
+    any post are answered; the posts themselves only get it when the server turned the switch on."""
+
+    def __init__(self, spec_button: bool = False):
         super().__init__(timeout=None)
+        if not spec_button:
+            self.remove_item(self.switch_spec)
 
     async def _event(self, interaction: discord.Interaction):
         event = db.event_by_message(interaction.message.id)
@@ -552,6 +618,28 @@ class RaidView(discord.ui.View):
     @discord.ui.button(label="Absent", style=discord.ButtonStyle.danger, custom_id="raid:absent")
     async def absent(self, interaction: discord.Interaction, _: discord.ui.Button):
         await self._status(interaction, "absent")
+
+    @discord.ui.button(label="Spec", emoji="🔄", style=discord.ButtonStyle.secondary, custom_id="raid:spec")
+    async def switch_spec(self, interaction: discord.Interaction, _: discord.ui.Button):
+        event = await self._event(interaction)
+        if not event:
+            return
+        if not spec_switch_on(interaction.guild_id):
+            return await interaction.response.send_message(
+                "Switching spec from the post is turned off. Press **Sign Up** to sign up again with another spec.",
+                ephemeral=True)
+        current = db.signup(event["id"], interaction.user.id)
+        if not current or not current["wow_class"] or current["status"] == "absent":
+            return await interaction.response.send_message(
+                "You aren't signed up with a character for this raid. Press **Sign Up** first.", ephemeral=True)
+        cls = current["wow_class"]
+        others = [s for s in wd.DATA.get(cls, {}) if s != current["spec"]]
+        if not others:
+            return await interaction.response.send_message(
+                f"There's no other {cls} spec to switch to. Press **Sign Up** to pick another character.", ephemeral=True)
+        await interaction.response.send_message(
+            f"You're signed up as **{current['char_name']}**, {current['spec']} {cls}. Switch to:",
+            view=SpecSwitchView(event["id"], cls, others), ephemeral=True)
 
     @discord.ui.button(label="Calendar", emoji="📅", style=discord.ButtonStyle.secondary, custom_id="raid:ics")
     async def calendar(self, interaction: discord.Interaction, _: discord.ui.Button):
@@ -1050,7 +1138,7 @@ async def post_event(channel, guild, creator_id: int, title: str, description: s
         mentions = discord.AllowedMentions.none()
     try:
         msg = await channel.send(content=ping.mention if ping else None, embed=render_embed(event, [], False),
-                                 view=RaidView(), allowed_mentions=mentions)
+                                 view=RaidView(spec_switch_on(guild.id)), allowed_mentions=mentions)
     except discord.HTTPException:
         db.delete_event(event_id)
         raise
@@ -1635,7 +1723,7 @@ async def raid_restore(interaction: discord.Interaction, event_id: int):
     locked = is_locked(event)
     try:
         msg = await channel.send(embed=render_embed(event, db.signups(event_id), locked),
-                                 view=ClosedView() if locked else RaidView(),
+                                 view=ClosedView() if locked else RaidView(spec_switch_on(event["guild_id"])),
                                  allowed_mentions=discord.AllowedMentions.none())
     except discord.HTTPException:
         db.undo_restore(copy)  # put it back the way it was, so it can still be restored later
@@ -2655,6 +2743,8 @@ class SetupView(discord.ui.View):
         async def flip(interaction: discord.Interaction):
             db.set_setting(self.guild_id, key, "0" if self._on(key) else "1")
             await self._again(interaction)
+            if key in ("show_realms", "signup_notes", "spec_switch"):  # these change how the posts look
+                await redraw_open_posts(self.guild_id)
         self._button(f"{label}: {'on' if on else 'off'}", flip,
                      discord.ButtonStyle.success if on else discord.ButtonStyle.secondary)
 
@@ -2666,6 +2756,7 @@ class SetupView(discord.ui.View):
         self._toggle("confirm_deletes", "Confirm deletes")
         self._toggle("show_realms", "Realms on posts")
         self._toggle("signup_notes", "Signup notes")
+        self._toggle("spec_switch", "Spec button")
         if wd.PRESET_NAME == "retail":
             self._toggle("raiderio", "Raider.IO import")
         self._back(1)
@@ -2696,6 +2787,7 @@ async def config_show(interaction: discord.Interaction):
     lines.append(f"**Realms on raid posts:** {'on' if db.setting(g, 'show_realms') == '1' else 'off'}")
     lines.append("**Signup notes:** " + {"off": "off", "officers": "on (officers, in /raid roster)",
                                           "post": "on (also on the raid post)"}[notes_mode(g)])
+    lines.append(f"**Spec button on raid posts:** {'on' if spec_switch_on(g) else 'off'}")
     backup_ch = db.setting(g, "backup_channel")
     lines.append(f"**Daily backup post:** {f'<#{backup_ch}>' if backup_ch else 'off'}")
     nudge = int(db.setting(g, "nudge_hours", 0))
@@ -2927,6 +3019,18 @@ async def config_notes(interaction: discord.Interaction, on: bool, onpost: bool 
     await interaction.response.send_message(text, ephemeral=True)
 
 
+@config.command(name="specswitch", description="Put a Spec button on raid posts to switch spec without signing up again (off by default)")
+@app_commands.describe(on="True = players who signed up can pick another spec of the same character from the post")
+async def config_specswitch(interaction: discord.Interaction, on: bool):
+    g = interaction.guild_id
+    db.set_setting(g, "spec_switch", "1" if on else "0")
+    await redraw_open_posts(g)  # add or take away the button on the open posts now
+    await interaction.response.send_message(
+        "Raid posts now have a **🔄 Spec** button. A signed-up player picks another spec of the same class; their "
+        "character, status and note stay, and role limits are checked again." if on else
+        "The Spec button is gone from raid posts. Players change spec by pressing **Sign Up** again.", ephemeral=True)
+
+
 @config.command(name="updatenotice", description="Say in the log channel when a newer version of the bot is released (off by default)")
 @app_commands.describe(on="True = check GitHub about once a day. It sends no information about your server")
 async def config_updatenotice(interaction: discord.Interaction, on: bool):
@@ -3117,7 +3221,8 @@ async def load_class_emojis() -> None:
 @bot.event
 async def setup_hook():
     await load_class_emojis()
-    bot.add_view(RaidView())  # keeps old raid posts working after a restart
+    bot.add_view(RaidView(spec_button=True))  # keeps old raid posts working after a restart (with every button, so a
+    # post that shows the Spec button is answered even if it was drawn before a restart)
     bot.tree.add_command(character)
     bot.tree.add_command(raid)
     bot.tree.add_command(config)

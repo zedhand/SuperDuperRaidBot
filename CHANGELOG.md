@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.13.0
+"Safety net" and "convenience" in one release. Everything new is optional and off by default; nothing new is required.
+- **More WoW versions.** Besides Retail and Classic Era (also Hardcore) there are now presets for Season of Discovery, Burning Crusade, Wrath, Cataclysm, Mists of Pandaria and WoW: Forever. Pick one in `SETUP.bat` or with `WOW_VERSION` in `.env`.
+- **Confirm and undo (`/config confirm`, `/raid restore`).** With the switch on, `/raid cancel` and `/raid remove` ask "are you sure?" first. A cancelled raid can be brought back with all its signups for 14 days with `/raid restore`, whether or not the switch is on.
+- **`/forgetme`.** A player deletes their own characters, signups, `/always` sign-ups and `/remindme` setting in every server the bot is in. It asks first and takes their name off the raid posts; raids they created stay.
+- **Daily backup post (`/config backupchannel`).** Every day after 04:00 (server time) the bot posts a copy of this server's data in a private admin channel, so a backup lives off the bot's PC. It refuses a public channel and keeps the newest 7 posts. `/config backup` now also holds only this server's data.
+- **Realms.** `/character add realm:` and `/character realm` save a realm with a character (Raider.IO import fills it in). `/config realms` shows it on raid posts, e.g. `Thrall (Area 52)`.
+- **Signup notes (`/config notes`).** Players add a short note with `/note`, e.g. `late 15 min`. Officers see it in `/raid roster`, and with `onpost: True` it shows on the post too. Mentions, links and formatting are removed.
+- **🔄 Spec button (`/config specswitch`).** Switch to another spec of the same character from the raid post without signing up again. Role limits and the bench are checked again when the role changes.
+- **`/raid promote`.** Move a chosen benched player in, ahead of the line. It refuses when their role or class is full unless you add `over_limit: True`.
+- **In-game invites (`/raid roster invites: True`).** One `/invite Name-Realm` line per player who is in or late, grouped so each block fits in a macro.
+- **Upcoming raids board (`/config board`).** One pinned message listing the next 15 raids with their time, signups per role and a link, kept up to date by itself. Raids in channels the board's readers can't see are left off.
+- **Low-signup alert (`/alerts lowsignup`).** A set number of hours before a raid, officers get one line in a channel you pick if the raid is short, optionally with a ping (`ping_officers: True`).
+- **Discord Scheduled Events (`/alerts events`).** Each raid gets an entry in the server's Events list that follows the raid (edited, cancelled, restored, started and ended with it). Only raids in channels everyone can see get one, and it needs the **Manage Events** permission.
+- `/alerts` is a new command group for alert settings, because `/config` is at Discord's limit of 25 commands.
+- Releases are now built, tested and scanned by GitHub Actions, and Dependabot keeps the dependencies up to date.
+- Tests: new `tests/test_v113.py` and `tests/test_release.py`.
+
 ## 1.12.0
 "Polish". Everything here is optional and off by default; nothing new is required.
 - **`/config setup`: a guided panel.** One private panel with pages for roles, channels, timing and the optional extras. Every control saves as soon as you choose it, shows the current value, and uses the same settings as the `/config` commands. Only the admin who opened it can use it.

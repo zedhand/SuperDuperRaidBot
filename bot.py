@@ -27,7 +27,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
-VERSION = "1.12.0"
+VERSION = "1.13.0"
 WINDOWS = os.name == "nt"  # only used to word messages for the person reading them
 BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / ".env"  # always the .env next to bot.py, whatever folder you launch from

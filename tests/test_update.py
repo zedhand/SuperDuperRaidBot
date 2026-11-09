@@ -165,8 +165,12 @@ try:
     code, out = run_update(d, "/api")
 finally:
     held.close()
-check("refuses and changes nothing", code == 1 and "still running" in out and 'VERSION = "1.0"' in (d / "bot.py").read_text(), out)
-code, out = run_update(d, "/api")
+if sys.platform == "win32":
+    # Update.bat is Windows-only, and the check relies on Windows refusing to open a file another process has open.
+    # PowerShell on macOS/Linux can't see that, so there this part only proves the updater still runs.
+    check("refuses and changes nothing", code == 1 and "still running" in out
+          and 'VERSION = "1.0"' in (d / "bot.py").read_text(), out)
+    code, out = run_update(d, "/api")
 check("once it's closed the update goes ahead", code == 0 and 'VERSION = "9.9"' in (d / "bot.py").read_text(), out)
 check("setup.py isn't brought back after first-run setup deleted it", not (d / "setup.py").exists())
 

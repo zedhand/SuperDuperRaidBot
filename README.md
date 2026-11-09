@@ -321,7 +321,7 @@ on any single date. `/always list` shows what you're in, and `/always leave` sto
 | Admins | `/config setup` | A guided private panel for the main settings: roles, channels, timing and the optional extras |
 | Admins | `/config raiderio` | Allow `/character import` (retail only, default: off) and set a default region and realm |
 | Admins | `/config updatenotice` | Say in the log channel when a newer version is released (default: off) |
-| Admins | `/config backup` | Sends you a private copy of the database as a file |
+| Admins | `/config backup` | Sends you a private copy of this server's data as a file |
 | Admins | `/config board` | A pinned **Upcoming raids** message in a channel you pick, with each raid's time, signups per role and a link to its post. It updates by itself (default: off) |
 | Admins | `/alerts lowsignup` | Tell officers in a channel you pick when a raid is short of people a set number of hours before it starts (default: off) |
 | Admins | `/alerts events` | Put each raid in the server's **Events** list as a Discord Scheduled Event that follows the raid (default: off, needs **Manage Events**) |
@@ -521,7 +521,7 @@ signups (and so their attendance history), their `/always` sign-ups, their `/rem
 kept for `/raid restore`. The bot asks first, then takes their name off the raid posts. Raids they created stay. The daily
 backups still hold the old data until they're replaced (within 7 days), as does any copy an admin made with `/config backup`.
 
-Admins can get a copy of the database any time with `/config backup` (it contains your members' Discord IDs, so keep it private). If `raidbot.db` is ever damaged, the bot restores the newest healthy daily backup on the next start, keeps the damaged file as `raidbot.db.damaged-<time>`, and `/status` tells you it happened. If there is no healthy backup it stops and explains, leaving the file untouched. Errors are also written to `raidbot.log` (the newest 5 MB are kept).
+Admins can get a copy of their server's data any time with `/config backup` (it contains your members' Discord IDs, so keep it private; like the daily backup post, it holds no other server's raids, players or settings). If `raidbot.db` is ever damaged, the bot restores the newest healthy daily backup on the next start, keeps the damaged file as `raidbot.db.damaged-<time>`, and `/status` tells you it happened. If there is no healthy backup it stops and explains, leaving the file untouched. Errors are also written to `raidbot.log` (the newest 5 MB are kept).
 
 To keep a backup somewhere other than the bot's PC, `/config backupchannel` picks a channel where the bot posts a copy every
 day after 04:00 (server time), starting right away. It refuses a channel that everyone in the server can see, and skips the

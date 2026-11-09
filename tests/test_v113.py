@@ -1,5 +1,5 @@
 """Offline tests for v1.13/v1.14: the WoW version presets, confirm/undo for /raid cancel and /raid remove, /forgetme,
-the daily backup post, realms on characters, signup notes, the Spec button, /raid promote, the invite export in /raid roster, the Upcoming raids board, the low-signup alert and Discord Scheduled Events (more suites are added below as features land).
+the daily backup post and the per-server /config backup, realms on characters, signup notes, the Spec button, /raid promote, the invite export in /raid roster, the Upcoming raids board, the low-signup alert and Discord Scheduled Events (more suites are added below as features land).
 
 Run:  python -I tests/test_v113.py        (or python tests/run_all.py for every suite)
 """
@@ -437,6 +437,37 @@ con.close()
 raw = copy.read_bytes()
 check("nothing deleted is left behind in the file", b"secret plans" not in raw and b"Stranger" not in raw and b"Their raid" not in raw)
 check("the live database is untouched", db.event(theirs) is not None and db.characters(880))
+
+print("the manual /config backup is this server's copy too")
+
+
+class FollowUpFiles:
+    def __init__(self): self.sent = []
+    async def send(self, *a, **k): self.sent.append((a, k))
+
+
+i = inter(officer)
+i.response.defer = lambda **k: asyncio.sleep(0)
+i.followup = FollowUpFiles()
+run(B.config_backup.callback(i))
+sent = i.followup.sent[-1] if i.followup.sent else ((), {})
+f = sent[1].get("file")
+check("/config backup sends a private file and says it is only this server's data",
+      f is not None and sent[1].get("ephemeral") and "this server's data" in sent[0][0], sent)
+manual = tmp / "manual-backup.db"
+f.fp.seek(0)
+manual.write_bytes(f.fp.read())
+con = sqlite3.connect(manual)
+check("the manual copy is a healthy database with this server's raid", con.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+      and ("Our raid",) in con.execute("SELECT title FROM events").fetchall())
+check("it holds no other server's rows", con.execute("SELECT COUNT(*) FROM events WHERE guild_id != 1").fetchone()[0] == 0
+      and con.execute("SELECT COUNT(*) FROM settings WHERE guild_id != 1").fetchone()[0] == 0
+      and con.execute("SELECT COUNT(*) FROM characters WHERE user_id=880").fetchone()[0] == 0)
+con.close()
+raw = manual.read_bytes()
+check("and the raw file has no trace of the other server's data",
+      b"secret plans" not in raw and b"Stranger" not in raw and b"Their raid" not in raw and b"Their cancelled" not in raw)
+check("the live database still has the other server's raid", db.event(theirs) is not None and db.characters(880))
 
 run(B._run_backuppost(int(day0.timestamp()) + 3600))
 check("only one copy a day", len(CH[21].sent) == 1)

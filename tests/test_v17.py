@@ -386,6 +386,10 @@ check("template autocomplete", [c.value for c in ac] == ["Naxx"])
 # ---------------------------------------------------------------- misc
 print("misc")
 check("invite link asks for thread permissions", checks.PERMISSIONS & (1 << 35) and checks.PERMISSIONS & (1 << 38))
+check("invite link asks for the 1.13 extras' permissions (Manage Messages, Attach Files, Manage Events)",
+      all(checks.PERMISSIONS & (1 << b) for b in (13, 15, 33)))
+check("invite link asks for no Administrator / Manage Server / Manage Roles",
+      not checks.PERMISSIONS & ((1 << 3) | (1 << 5) | (1 << 28)))
 check("embed footer: no repeat marker when off", "🔁" not in E.build_embed(db.event(s1) if False else db.event(new_e), [], False).footer.text)
 
 print(f"\n{passed} passed, {failed} failed")

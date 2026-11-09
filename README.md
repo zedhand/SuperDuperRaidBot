@@ -123,8 +123,10 @@ The bot needs these permissions in each channel where raids are posted: **View C
 Read Message History** (and **Create Public Threads** if you want discussion threads). If your signup channels are
 private, add the bot's role to them. Run **`/status`** in Discord any time: it lists channels where something is missing.
 
-A few optional extras need one more permission each. The invite link from setup doesn't ask for these, so give them to
-the bot's role yourself (Server Settings → Roles, or the channel's permissions) only if you turn the extra on:
+A few optional extras need one more permission each. The invite link from setup asks for these too, so a bot added
+with it already has them. If you added the bot before version 1.13.1, or untick them on the invite screen, give them
+to the bot's role yourself (Server Settings → Roles, or the channel's permissions) if you turn the extra on. A
+channel's own permissions can still take one away there, so check those if an extra doesn't work:
 
 | Extra | Permission it needs |
 |---|---|
@@ -497,9 +499,10 @@ Still stuck? [Open an issue](../../issues/new/choose) with the bot version and t
   git-ignored. If it leaks, reset it right away (Developer Portal → Bot → **Reset Token**).
 - **What the bot can see:** member lists (that's what *Server Members Intent* is for, e.g. for `/raid unsigned`) and the
   commands and button clicks aimed at it. It does **not** read your chat messages.
-- **What it can do:** only what its role allows in each channel. Give it just the channels it needs. **Manage Events**,
-  **Manage Messages** and **Attach Files** are only needed for the optional extras listed in
-  [Step 3](#step-3-check-the-bot-has-access-to-your-channels); leave them off if you don't use those.
+- **What it can do:** only what its role allows in each channel. Give it just the channels it needs. The invite link
+  asks for **Manage Events**, **Manage Messages** and **Attach Files**, but they're only used by the optional extras
+  listed in [Step 3](#step-3-check-the-bot-has-access-to-your-channels); untick them on the invite screen, or take them
+  off the bot's role later, if you don't use those.
 - **What it sends to other websites:** nothing by default; it only talks to Discord. Two **optional** features contact another site, and only when an admin turns them on: `/config updatenotice` asks GitHub for the newest release number (no information about you or your server), and `/config raiderio` lets a player run `/character import`, which sends the character name and realm *that player typed* to raider.io to look it up (no accounts, nothing else).
 - **`Update.bat` downloads code from this repository's GitHub releases** and checks the download against the checksum GitHub
   publishes for it, which catches corrupted downloads. It can't protect against the repository itself being compromised, so

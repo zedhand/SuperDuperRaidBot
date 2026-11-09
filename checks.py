@@ -28,9 +28,10 @@ USER_AGENT = "DiscordBot (https://github.com/zedhand/SuperDuperRaidBot, 1.13.2)"
 
 # View Channels + Send Messages + Embed Links + Read Message History + Use External Emojis
 # + Create Public Threads + Send Messages in Threads (for the optional per-raid discussion threads)
-# + Manage Messages (pin the /config board), Attach Files (/config backupchannel), Manage Events (/alerts events)
+# + Manage Messages and Pin Messages (pin the /config board: Discord moved pinning to its own permission),
+# Attach Files (/config backupchannel), Manage Events and Create Events (/alerts events)
 PERMISSIONS = (1024 + 2048 + 16384 + 65536 + 262144 + (1 << 35) + (1 << 38)
-               + (1 << 13) + (1 << 15) + (1 << 33))
+               + (1 << 13) + (1 << 51) + (1 << 15) + (1 << 33) + (1 << 44))
 
 _MEMBERS_INTENT_FLAGS = (1 << 14) | (1 << 15)  # GATEWAY_GUILD_MEMBERS / _LIMITED
 

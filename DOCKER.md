@@ -111,7 +111,10 @@ python3 setup.py
 Or do it by hand: `cp .env.example .env`, then `nano .env`, fill in the values (see the README's *Settings* section),
 and press `Ctrl+O`, Enter, `Ctrl+X` to save and close.
 
-Your token stays in that `.env` file on the Pi. It is never put into the Docker image, and git ignores it.
+Your token stays in that `.env` file on the Pi. It is never put into the Docker image, and git ignores it. Keep the file
+private with `chmod 600 .env` (the setup wizard does this for you). Docker passes the settings to the running container,
+so anyone who can run `docker` commands on the Pi (for example `docker inspect raidbot`) can read the token too: don't
+add other people's accounts to the `docker` group.
 
 ## Step 5: Move your raids and signups over from Windows
 
@@ -156,7 +159,7 @@ Type these in the bot's folder on the Pi (`cd ~/SuperDuperRaidBot` first).
 
 | To... | Type |
 |---|---|
-| See if it's running | `docker compose ps` |
+| See if it's running | `docker compose ps` (the status says **healthy** once the bot's scheduler is running) |
 | Watch what it's doing (Ctrl+C to stop watching) | `docker compose logs -f` |
 | Stop it | `docker compose down` |
 | Start it again | `docker compose up -d` |
@@ -176,7 +179,9 @@ cd ~/SuperDuperRaidBot
 
 It asks GitHub for the newest published release, switches to it, downloads that version's ready-made image and restarts
 the bot. Nothing is built on the Pi, so it only takes as long as the download. Your `.env` and the
-`data` folder are never touched, and the database upgrades itself on the next start, just like `Update.bat`. With
+`data` folder are never touched, and the database upgrades itself on the next start, just like `Update.bat`. The previous
+version's image is kept, and the script prints the one line that goes back to it. If you edited one of the bot's own files
+(such as `docker-compose.yml`), it stops and tells you which, so nothing of yours is overwritten. With
 `/config updatenotice` on, the bot tells you in the log channel when there's a new version.
 
 ## Building the image yourself

@@ -29,7 +29,7 @@ Everything below is optional and off by default unless noted. Items 1-13 shipped
 | 11 | Pinned "Upcoming raids" board that edits itself | One place to see the week | S-M | Done (on the v1.13 branch, `/config board`) |
 | 12 | Low-signup alert to officers (e.g. 15/25 a day before) | Catches a failing raid early | S | Done (on the v1.13 branch, `/alerts lowsignup`) |
 | 13 | Native Discord Scheduled Event with each raid | Shows in the Events tab and phone calendar | M | Done (on the v1.13 branch, `/alerts events`) |
-| 14 | Docker image and a Raspberry Pi guide | Runs 24/7 without a Windows PC | M | Planned |
+| 14 | Docker image and a Raspberry Pi guide | Runs 24/7 without a Windows PC | M | Done (v1.13.1) |
 
 ## Other ideas
 | Idea | Why | Effort |

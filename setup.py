@@ -77,7 +77,13 @@ def write_env(values: dict):
     for key, val in values.items():
         if key not in done:
             lines.append(f"{key}={val}")
-    ENV_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # Write a temporary file, make it private (the token is like a password), then swap it in, so a crash
+    # halfway never leaves a cut-off .env and other users on a Linux machine or a Pi can't read the token.
+    tmp = ENV_PATH.with_name(ENV_PATH.name + ".tmp")
+    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    if os.name != "nt":
+        os.chmod(tmp, 0o600)
+    os.replace(tmp, ENV_PATH)
 
 
 def _pc_offset():
@@ -171,7 +177,10 @@ def wait_members_intent(token: str):
 
 def pick_server(token: str, me: dict) -> int:
     url = checks.invite_url(me["id"])
-    guilds = checks.bot_guilds(token)
+    try:
+        guilds = checks.bot_guilds(token)
+    except checks.DiscordError:
+        guilds = []
     if not guilds:
         say("A page is opening to add the bot to your server.")
         say("Pick your server in the dropdown and click 'Continue', then 'Authorize'.")
@@ -182,7 +191,10 @@ def pick_server(token: str, me: dict) -> int:
         while not guilds:
             time.sleep(3)
             waited += 3
-            guilds = checks.bot_guilds(token)
+            try:
+                guilds = checks.bot_guilds(token)
+            except checks.DiscordError:  # a network blip or a rate limit: keep waiting, don't crash
+                guilds = []
             if waited % 30 == 0 and not guilds:
                 say("  ...still waiting for you to click Authorize.")
             if waited >= 600:
@@ -270,8 +282,13 @@ def main():
     OK_FLAG.write_text("ok", encoding="utf-8")
     offer_shortcuts()
     say()
-    say("All set! Settings saved. This setup file will now delete itself and the bot will start.")
-    say("From now on, start the bot with start.bat. Leave its window open.")
+    if os.name == "nt" and (BASE / "start.bat").exists():
+        say("All set! Settings saved. This setup file will now delete itself and the bot will start.")
+        say("From now on, start the bot with start.bat. Leave its window open.")
+    else:
+        say("All set! Settings saved in .env.")
+        say("Start the bot with Docker:  docker compose up -d      (see DOCKER.md)")
+        say("or from the source:         .venv/bin/python bot.py")
     time.sleep(2)
 
 

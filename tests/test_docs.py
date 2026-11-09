@@ -80,6 +80,35 @@ for top in B.bot.tree.get_commands():
             undocumented.append(" ".join(p))
 check("every registered command and subcommand appears in the README", not undocumented, undocumented)
 
+print("/help")
+import asyncio  # noqa: E402
+import types  # noqa: E402
+
+shown = {}
+
+
+async def _send(*a, **k): shown.update(k)
+asyncio.run(B.help_command.callback(types.SimpleNamespace(response=types.SimpleNamespace(send_message=_send))))
+help_embed = shown.get("embed")
+check("/help fits Discord's limits (every field 1024 or less, 6000 in all)", help_embed is not None
+      and all(len(f.value) <= 1024 and len(f.name) <= 256 for f in help_embed.fields) and len(help_embed) <= 6000,
+      [len(f.value) for f in help_embed.fields] if help_embed else None)
+help_text = " ".join(f.value for f in help_embed.fields) if help_embed else ""
+missing_help = [f"/{g.name} {c.name}" for g in (B.config, B.alerts) for c in g.commands if f"/{g.name} {c.name}`" not in help_text]
+check("/help mentions every /config and /alerts setting", not missing_help, missing_help)
+
+print("settings in .env")
+code = (root / "bot.py").read_text(encoding="utf-8")
+read = set(re.findall(r'os\.getenv\("([A-Z_]+)"', code)) | set(re.findall(r'_env_int\("([A-Z_]+)"', code))
+read -= {"RAIDBOT_DOCKER"}  # set by the Dockerfile, not by people
+example = (root / ".env.example").read_text(encoding="utf-8")
+readme_text = (root / "README.md").read_text(encoding="utf-8")
+check("every setting the bot reads is in .env.example", all(re.search(rf"^#?\s*{v}=", example, re.M) for v in read),
+      sorted(v for v in read if not re.search(rf"^#?\s*{v}=", example, re.M)))
+check("every setting the bot reads is in the README's Settings table", all(f"| `{v}` |" in readme_text for v in read),
+      sorted(v for v in read if f"| `{v}` |" not in readme_text))
+check(".env.example doesn't call GUILD_ID required (it's optional)", "REQUIRED. Your server" not in example)
+
 print("changelog and metadata")
 changelog = root / "CHANGELOG.md"
 if changelog.exists():

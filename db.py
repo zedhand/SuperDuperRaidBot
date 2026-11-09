@@ -725,22 +725,41 @@ def open_database(path: str = "raidbot.db") -> DB:
     """Open the database. If the file is damaged, put it aside and restore the newest healthy daily
     backup instead of starting with an empty or broken database. Raises SystemExit with a plain-English
     message when the file is damaged and there is no healthy backup (the file is then left untouched)."""
+    target = Path(path).resolve()
+    # SQLite may roll back or delete a journal while opening a damaged file, so keep a copy of any journal first:
+    # if the file turns out to be damaged, it goes next to the damaged copy and can help recover it by hand.
+    saved = {}
+    for ext in ("-wal", "-journal"):
+        side = Path(str(target) + ext)
+        if side.exists() and side.stat().st_size:
+            saved[ext] = side.with_name(side.name + ".before-open")
+            shutil.copy2(side, saved[ext])
     try:
-        return DB(path)
+        database = DB(path)
+        for copy in saved.values():
+            copy.unlink(missing_ok=True)
+        return database
     except DatabaseCorrupt as e:
         problem = str(e)
-    target = Path(path).resolve()
     good = next((b for b in sorted((target.parent / "backups").glob("raidbot-*.db"), reverse=True)
                  if file_is_healthy(b)), None)
     if good is None:
+        for copy in saved.values():
+            copy.unlink(missing_ok=True)
         raise SystemExit(f"The database file {target.name} is damaged ({problem}) and there is no healthy backup "
                          f"in the 'backups' folder to restore. The file was left untouched. Copy a backup "
                          f"into place by hand, or move {target.name} away to start fresh.")
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     aside = target.with_name(f"{target.name}.damaged-{stamp}")
     target.replace(aside)
-    for ext in ("-wal", "-shm", "-journal"):
-        Path(str(target) + ext).unlink(missing_ok=True)
+    for ext in ("-wal", "-journal"):  # kept with the damaged copy: they can help recover it by hand
+        side = Path(str(target) + ext)
+        if ext in saved:
+            saved[ext].replace(Path(str(aside) + ext))
+            side.unlink(missing_ok=True)
+        elif side.exists():
+            side.replace(Path(str(aside) + ext))
+    Path(str(target) + "-shm").unlink(missing_ok=True)  # only a cache of the -wal file
     shutil.copy2(good, target)
     database = DB(str(target))
     database.recovered_from = good.name

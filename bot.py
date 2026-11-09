@@ -2582,7 +2582,7 @@ def sched_can_show(guild, raid_channel_id: int) -> bool:
 
 def sched_can_manage(guild) -> bool:
     perms = getattr(getattr(guild, "me", None), "guild_permissions", None)
-    return bool(perms and (perms.manage_events or perms.administrator))
+    return bool(perms and (perms.manage_events or perms.administrator or getattr(perms, "create_events", False)))
 
 
 def sched_fields(event) -> dict:
@@ -3162,6 +3162,8 @@ async def status(interaction: discord.Interaction):
             continue
         perms = ch.permissions_for(interaction.guild.me)
         missing = [p.replace("_", " ") for p in needed if not getattr(perms, p)]
+        if any(str(e).startswith("<") for e in wd.CLASS_EMOJI.values()) and not getattr(perms, "use_external_emojis", True):
+            missing.append("use external emojis (class icons show as plain squares)")
         if missing:
             problems.append(f"<#{cid}>: missing {', '.join(missing)}")
     lines.append("**Channel permissions:** " + ("all good ✅" if not problems else "\n" + "\n".join("⚠️ " + p for p in problems)))
@@ -3180,7 +3182,8 @@ async def status(interaction: discord.Interaction):
         lines.append("**Last problem:** none since the bot started")
     if db.recovered_from:
         lines.append(f"⚠️ The database was damaged when the bot started, so it was restored from `{db.recovered_from}`. "
-                     "Raids created after that backup are missing; the damaged file was kept next to it.")
+                     "Raids created after that backup are missing, and anyone who used `/forgetme` since then should run it again; "
+                     "the damaged file was kept next to it.")
     await interaction.response.send_message("\n".join(lines), ephemeral=True,
                                             allowed_mentions=discord.AllowedMentions.none())
 
@@ -3844,7 +3847,7 @@ async def config_board(interaction: discord.Interaction, channel: Optional[disco
     pinned = await pin_board(msg)
     notes = []
     if not pinned:
-        notes.append("I couldn't pin it: give me Manage Messages there, or pin it yourself.")
+        notes.append("I couldn't pin it: give me Pin Messages (or Manage Messages) there, or pin it yourself.")
     _, hidden = board_raids(g, channel, now)
     if hidden:
         notes.append(f"{plural(hidden, 'upcoming raid')} {'is' if hidden == 1 else 'are'} left off because some people "
@@ -3920,17 +3923,20 @@ async def help_command(interaction: discord.Interaction):
         "`/raid list` upcoming raids with counts · `/raid add` sign someone up or change their status\n"
         "`/raid promote` move a benched player in, ahead of the line\n"
         "`/raid close` · `/raid cancel` (undo: `/raid restore`) · `/raid remove` · `/raid unsigned`"))
-    embed.add_field(name="Admins", inline=False, value=(
-        "`/config show` · `/config timezone` · `/config reminder`\n"
+    embed.add_field(name="Admins: main settings", inline=False, value=(
+        "`/config setup` guided panel for the main settings · `/config show` · `/config timezone` · `/config reminder`\n"
         "`/config officer` who can manage every raid · `/config pingrole` default role to ping\n"
         "`/config channel` per-channel (or category) ping role and raid leaders\n"
-        "`/config threads` discussion thread per raid · `/config archive` delete old posts\n"
-        "`/config nudge` ping people who haven't answered · `/alerts lowsignup` tell officers a raid is short · `/alerts events` Discord events · `/config logchannel` activity log\n"
         "`/config raiderrole` only that role can sign up · `/config autoclose` close sign-ups before the start\n"
-        "`/config voicechannel` automatic no-shows from a voice channel · `/config buffs` warn about missing Bloodlust / battle res\n"
-        "`/config digest` weekly attendance summary. Officers can limit classes: `/raid create classes: Mage 4`\n"
-        "`/config setup` guided panel for the main settings · `/config raiderio` · `/config updatenotice` · `/config confirm` · `/config realms` · `/config notes`\n"
-        "`/config backup` get a copy of the database · `/status` bot health check"))
+        "`/config threads` discussion thread per raid · `/config archive` delete old posts\n"
+        "`/config logchannel` activity log · `/config backup` get a copy of the database · `/status` bot health check"))
+    embed.add_field(name="Admins: extras", inline=False, value=(
+        "`/config nudge` ping people who haven't answered · `/config digest` weekly attendance summary\n"
+        "`/alerts lowsignup` tell officers a raid is short · `/alerts events` Discord events\n"
+        "`/config voicechannel` automatic no-shows · `/config buffs` warn about missing Bloodlust / battle res\n"
+        "`/config board` a pinned list of upcoming raids · `/config backupchannel` daily backup post\n"
+        "`/config specswitch` Spec button · `/config notes` · `/config realms` · `/config confirm`\n"
+        "`/config raiderio` · `/config updatenotice`. Officers can limit classes: `/raid create classes: Mage 4`"))
     embed.set_footer(text="Anyone on the bench is moved in automatically when a slot opens.")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -3942,7 +3948,7 @@ async def on_tree_error(interaction: discord.Interaction, error: app_commands.Ap
     name = interaction.command.qualified_name if interaction.command else "?"
     log.error("Command /%s failed", name, exc_info=error)
     note_error(f"/{name}: {error!r}")
-    msg = "Something went wrong with that command. The details are in the bot's window; ask your admin to check it."
+    msg = "Something went wrong with that command. The details are in raidbot.log (and `/status`); ask your admin to check it."
     try:
         if interaction.response.is_done():
             await interaction.followup.send(msg, ephemeral=True)
@@ -4146,7 +4152,9 @@ def _stop_on_sigterm() -> None:
 if __name__ == "__main__":
     setup_logging()
     if db.recovered_from:
-        log.warning("The database was damaged; restored from backups/%s (the damaged file was kept)", db.recovered_from)
+        log.warning("The database was damaged; restored from backups/%s (the damaged file was kept). Changes since "
+                    "that backup are missing, and anyone who used /forgetme since then should run it again.",
+                    db.recovered_from)
     _instance_lock = single_instance(os.getenv("DB_PATH", "raidbot.db"))
     if _instance_lock is None:
         raise SystemExit("The bot is already running (another window, or 'Start with Windows' started it). "

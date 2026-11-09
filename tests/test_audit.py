@@ -392,5 +392,54 @@ r = subprocess.run([sys.executable, "-I", "-c", code], cwd=proj, capture_output=
 check("a second copy is refused", r.stdout.strip().endswith("second"), r.stdout[-200:] + r.stderr[-300:])
 first.close()
 
+
+# ------------------------------------------------------------------ smaller fixes
+print("a very full roster")
+import embeds as E  # noqa: E402
+names = [f"`{n}` **Name{n}**" for n in range(200)]
+out = E._fit(names, 300)
+check("whole entries only, then '…and N more' with the right count", len(out) <= 300 and out.endswith("more")
+      and out.count("**Name") + int(out.rsplit("and ", 1)[1].split()[0]) == 200, out[-40:])
+check("a note with a comma is never cut in half", E._fit(["`1` **A** · *late, sorry*"] * 50, 120, ", ").count("*") % 2 == 0)
+field = E._tanks_and_healers(names[:100], "\n\n**Healer (3)**\n", ["`h1` **Heal1**", "`h2` **Heal2**", "`h3` **Heal3**"], 1024)
+check("a long tank list can't push the healers out", len(field) <= 1024 and "Healer (3)" in field and "Heal3" in field, len(field))
+
+print("invite link and game data")
+import checks as C  # noqa: E402
+import wow_data as wd  # noqa: E402
+check("the invite asks for Pin Messages and Create Events", C.PERMISSIONS & (1 << 51) and C.PERMISSIONS & (1 << 44))
+check("Cataclysm Classic counts a Warlock's Soulstone as a battle res",
+      "Warlock" in wd.UTILITY_BY_PRESET["cata_classic"]["battle_res"][1])
+
+print("restoring a damaged database keeps its journal")
+broken = tmp / "rest"
+(broken / "backups").mkdir(parents=True)
+ok = dbmod.DB(str(broken / "backups" / "raidbot-2026-01-01.db"))
+ok.conn.close()
+(broken / "raidbot.db").write_bytes(b"this is not a database" * 100)
+(broken / "raidbot.db-journal").write_bytes(b"journal")
+restored = dbmod.open_database(str(broken / "raidbot.db"))
+restored.conn.close()
+check("the journal moved next to the damaged copy, not deleted",
+      any(f.name.endswith("-journal") and ".damaged-" in f.name for f in broken.iterdir()), [f.name for f in broken.iterdir()])
+
+print("the setup wizard")
+import setup as S  # noqa: E402
+S.ENV_PATH, S.TEMPLATE_PATH = tmp / "wiz.env", proj / ".env.example"
+S.write_env({"DISCORD_TOKEN": "placeholder-token", "GUILD_ID": ""})
+check(".env is written whole, with the token", "DISCORD_TOKEN=placeholder-token" in S.ENV_PATH.read_text())
+if os.name != "nt":
+    check(".env is private to its owner on Linux / a Pi", (S.ENV_PATH.stat().st_mode & 0o777) == 0o600, oct(S.ENV_PATH.stat().st_mode))
+calls = {"n": 0}
+
+
+def flaky(token):
+    calls["n"] += 1
+    if calls["n"] < 3:
+        raise C.DiscordError(0, "network blip")
+    return [{"id": "1", "name": "Test Server"}]
+C.bot_guilds, S.webbrowser.open, S.time.sleep = flaky, lambda url: None, lambda s: None
+check("a network blip while waiting for the bot to join doesn't crash it", S.pick_server("t", {"id": "42"}) == 1)
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

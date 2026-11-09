@@ -1,0 +1,18 @@
+# Start:   docker compose up -d          Logs:  docker compose logs -f
+# Stop:    docker compose down           Update: ./docker-update.sh
+# Step-by-step guide (Raspberry Pi, moving over from Windows, backups): DOCKER.md
+services:
+  raidbot:
+    build: .
+    image: superduperraidbot:local
+    container_name: raidbot
+    restart: unless-stopped       # comes back after a crash, a reboot or a power cut
+    env_file: .env                # your token and settings; never copied into the image
+    volumes:
+      - ./data:/data              # raidbot.db, backups/ and raidbot.log
+      - ./icons:/app/icons:ro     # optional class artwork (see icons/README.txt)
+    logging:                      # keep Docker's own copy of the console output small (kind to SD cards)
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"

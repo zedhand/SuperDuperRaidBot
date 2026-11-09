@@ -73,8 +73,9 @@ It does **not** read your server's chat messages. It only reacts to its own comm
 1. **A PC that's always on.** Run `start.bat` and leave the window open. In Windows, set the PC to never sleep:
    *Settings → System → Power → Screen and sleep → put my device to sleep after: Never*. Closing the window stops the bot.
 2. **A spare laptop or mini-PC** left on in a corner is perfect for this. It barely uses any power or internet.
-3. **A Raspberry Pi or a small rented server (VPS).** It's plain Python, so it runs on Linux too. See
-   [any OS, from source](#any-os-from-source).
+3. **A Raspberry Pi or a small rented server (VPS).** The easiest way is Docker: [DOCKER.md](DOCKER.md) is a step-by-step
+   guide from a blank Raspberry Pi to a bot that runs 24/7 and restarts by itself, including moving your existing raids and
+   signups over from Windows. It's plain Python, so you can also run it [from source](#any-os-from-source).
 
 **Start it automatically when Windows starts** (so a reboot or power cut doesn't take it down for long). The easy way: at
 the end of `SETUP.bat` answer **y** to *"Start the bot automatically when Windows starts?"*, or double-click **`Shortcuts.bat`**
@@ -141,7 +142,8 @@ Anyone with the **Manage Events** permission can already post raids. To let a ro
 You're done. Continue to [Using it](#using-it).
 
 ### Any OS, from source
-For Linux, macOS, a Raspberry Pi or a server. You need Python 3.10 or newer (3.12 is recommended).
+For Linux, macOS, a Raspberry Pi or a server. You need Python 3.10 or newer (3.12 is recommended). On a Raspberry Pi or a
+server, **Docker is simpler**: follow [DOCKER.md](DOCKER.md) instead.
 
 ```bash
 git clone https://github.com/zedhand/SuperDuperRaidBot.git

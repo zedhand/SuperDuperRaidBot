@@ -25,7 +25,7 @@ TOP = "SuperDuperRaidBot"
 
 # Exactly what a release contains (update.ps1 installs this same set). A new shipped file must be added here.
 FILES = [
-    "CHANGELOG.md", "LICENSE", "README.md", "SECURITY.md",
+    "CHANGELOG.md", "DOCKER.md", "LICENSE", "README.md", "SECURITY.md",
     "SETUP.bat", "Shortcuts.bat", "Update.bat", "start.bat", "update.ps1",
     "bot.py", "checks.py", "db.py", "embeds.py", "setup.py", "wow_data.py",
     "requirements.txt", "icons/README.txt",

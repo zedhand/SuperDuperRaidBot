@@ -1,0 +1,10 @@
+# Only what the image needs is sent to Docker. Everything else is left out, so the database, logs, backups,
+# .env (your token), icon artwork, git history and anything else in the folder can never end up in an image.
+*
+!Dockerfile
+!requirements.txt
+!bot.py
+!checks.py
+!db.py
+!embeds.py
+!wow_data.py

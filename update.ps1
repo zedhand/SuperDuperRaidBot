@@ -89,7 +89,7 @@ try {
     $backup = Join-Path $here ("backups\code-" + $old + "-" + $stamp)
     New-Item -ItemType Directory $backup -Force | Out-Null
     $code = @("bot.py", "checks.py", "db.py", "embeds.py", "wow_data.py", "setup.py", "start.bat",
-              "requirements.txt", "README.md", "LICENSE", "CHANGELOG.md", "SECURITY.md", "Shortcuts.bat")
+              "requirements.txt", "README.md", "LICENSE", "CHANGELOG.md", "SECURITY.md", "Shortcuts.bat", "DOCKER.md")
     foreach ($f in $code) {
         $p = Join-Path $here $f
         if (Test-Path $p) { Copy-Item $p $backup }

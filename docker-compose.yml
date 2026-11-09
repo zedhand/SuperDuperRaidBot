@@ -1,10 +1,13 @@
 # Start:   docker compose up -d          Logs:  docker compose logs -f
 # Stop:    docker compose down           Update: ./docker-update.sh
 # Step-by-step guide (Raspberry Pi, moving over from Windows, backups): DOCKER.md
+#
+# Docker downloads the ready-made image for this version (built for PCs and the Raspberry Pi by the release workflow),
+# so nothing is built on the Pi. The tag below always matches VERSION in bot.py. To build from the source instead:
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build    (or ./docker-update.sh --build)
 services:
   raidbot:
-    build: .
-    image: superduperraidbot:local
+    image: ghcr.io/zedhand/superduperraidbot:1.13.1
     container_name: raidbot
     restart: unless-stopped       # comes back after a crash, a reboot or a power cut
     env_file: .env                # your token and settings; never copied into the image

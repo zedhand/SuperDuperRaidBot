@@ -48,4 +48,5 @@ Everything below is optional and off by default unless noted. Items 1-13 shipped
 3. Copy an old `raidbot.db` in and confirm the migration and that old posts' buttons still work.
 4. In a test server: create a raid, sign up past a role limit, leave and confirm bench promotion; edit the time; try `/config channel` with a non-admin account.
 5. Push the tag (`git tag v1.x.y && git push origin v1.x.y`). The Release workflow reruns the tests, builds the zip, scans it for
-   secrets (`.env` values, tokens, IDs, personal paths, unlisted files) and creates a **draft** release. Check the notes, then publish.
+   secrets (`.env` values, tokens, IDs, personal paths, unlisted files), creates a **draft** release and pushes the Docker image.
+   Check the notes, then publish (that also moves the image's `:latest` tag).

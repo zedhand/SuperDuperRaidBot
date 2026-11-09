@@ -6,7 +6,8 @@ signups) over from Windows. You don't need to know Linux: every command is here 
 30 minutes, most of it waiting for downloads.
 
 The bot runs inside **Docker**, which packages it with exactly the Python it needs, starts it again after a crash, a
-reboot or a power cut, and makes updating one command. The same steps work on any Linux machine with Docker, such as an
+reboot or a power cut, and makes updating one command. Each release comes with a ready-made image for the Pi (and for
+PCs), so the Pi only downloads it and never has to build the bot itself. The same steps work on any Linux machine with Docker, such as an
 old laptop or a rented server (VPS): skip to [step 3](#step-3-install-docker).
 
 > **Only run the bot in one place at a time.** Two copies with the same token answer every button twice and send every
@@ -24,6 +25,7 @@ old laptop or a rented server (VPS): skip to [step 3](#step-3-install-docker).
 - [Step 6: Start it](#step-6-start-it)
 - [Everyday commands](#everyday-commands)
 - [Updating](#updating)
+- [Building the image yourself](#building-the-image-yourself)
 - [Backups](#backups)
 - [Troubleshooting](#troubleshooting)
 
@@ -136,7 +138,7 @@ cd ~/SuperDuperRaidBot
 ./docker-update.sh
 ```
 
-The first start builds the bot's image, which takes a few minutes on a Pi. Then watch it start:
+The first start downloads the bot's ready-made image (well under 100 MB), which takes a minute or so. Then watch it start:
 
 ```bash
 docker compose logs -f
@@ -172,9 +174,30 @@ cd ~/SuperDuperRaidBot
 ./docker-update.sh
 ```
 
-It asks GitHub for the newest published release, switches to it, rebuilds and restarts the bot. Your `.env` and the
+It asks GitHub for the newest published release, switches to it, downloads that version's ready-made image and restarts
+the bot. Nothing is built on the Pi, so it only takes as long as the download. Your `.env` and the
 `data` folder are never touched, and the database upgrades itself on the next start, just like `Update.bat`. With
 `/config updatenotice` on, the bot tells you in the log channel when there's a new version.
+
+## Building the image yourself
+
+You don't normally need this: every release has a ready-made image at `ghcr.io/zedhand/superduperraidbot`. But if the
+download doesn't work (no access to `ghcr.io`, or you changed the code yourself), the Pi can build the image from the
+files in the bot's folder instead, as earlier versions did. It takes a few minutes on a Pi:
+
+```bash
+cd ~/SuperDuperRaidBot
+./docker-update.sh --build
+```
+
+`./docker-update.sh` also does this by itself when the download fails. To build without updating to a new release:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+```
+
+The image it builds gets the same name as the ready-made one, so all the everyday commands keep working. The next plain
+`./docker-update.sh` goes back to the ready-made image.
 
 ## Backups
 
@@ -210,8 +233,12 @@ it there with `start.bat`.
   [step 4](#step-4-download-the-bot-and-add-your-settings).
 - **`unable to open database file`** or *permission denied* on `/data`: the bot runs as user number 1000 and can't
   write to the `data` folder. Fix it with `sudo chown -R 1000:1000 data`, then `docker compose up -d`.
-- **`exec format error`** or the build fails on a Pi: it's running the 32-bit system. `uname -m` must say `aarch64`.
+- **`no matching manifest for linux/arm/v7`**, **`exec format error`** or the build fails on a Pi: it's running the
+  32-bit system. The ready-made image is for 64-bit only. `uname -m` must say `aarch64`.
   Write the card again with **Raspberry Pi OS Lite (64-bit)**.
+- **`docker compose pull` says *denied*, *unauthorized* or *manifest unknown***: the ready-made image for that version
+  isn't available. `./docker-update.sh` builds it on the Pi instead, or run `./docker-update.sh --build` (see
+  [Building the image yourself](#building-the-image-yourself)).
 - **Buttons answer twice, or reminders arrive twice**: the bot is still running on Windows too. Close it there.
 - **Raid times are off by some hours**: the bot uses `TIMEZONE` from `.env` (or `/config timezone`), not the Pi's
   clock. Check those.

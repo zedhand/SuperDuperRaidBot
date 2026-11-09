@@ -1,5 +1,8 @@
 # Changelog
 
+## Unreleased
+- The invite link from `SETUP.bat` now also asks for **Manage Events**, **Manage Messages** and **Attach Files**, so `/alerts events`, the pinned `/config board` and `/config backupchannel` work on a new install without changing the bot's role by hand. A bot added earlier keeps its old permissions; give it these yourself if you use those extras.
+
 ## 1.13.0
 "Safety net" and "convenience" in one release. Everything new is optional and off by default; nothing new is required.
 - **More WoW versions.** Besides Retail and Classic Era (also Hardcore) there are now presets for Season of Discovery, Burning Crusade, Wrath, Cataclysm, Mists of Pandaria and WoW: Forever. Pick one in `SETUP.bat` or with `WOW_VERSION` in `.env`.

@@ -44,3 +44,23 @@ jobs:
         run: bandit -q -ll -r bot.py db.py checks.py embeds.py wow_data.py setup.py
       - name: Known vulnerabilities in dependencies
         run: pip-audit -r requirements.txt
+
+  docker:
+    name: Docker image (PC and Raspberry Pi)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-qemu-action@v3      # lets the PC runner build the Raspberry Pi (arm64) image too
+      - uses: docker/setup-buildx-action@v3
+      - name: Build for amd64 and arm64 (not pushed anywhere)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: false
+      - name: Starts and explains a missing token instead of crashing
+        run: |
+          docker build -t raidbot:ci .
+          out=$(docker run --rm raidbot:ci 2>&1) && exit 1 || true
+          echo "$out"
+          echo "$out" | grep -q "DISCORD_TOKEN isn't set"

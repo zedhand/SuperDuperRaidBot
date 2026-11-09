@@ -29,6 +29,7 @@ from dotenv import load_dotenv
 
 VERSION = "1.13.0"
 WINDOWS = os.name == "nt"  # only used to word messages for the person reading them
+IN_DOCKER = bool(os.getenv("RAIDBOT_DOCKER"))  # set by the Dockerfile; settings then come from docker-compose's env_file
 BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / ".env"  # always the .env next to bot.py, whatever folder you launch from
 load_dotenv(ENV_PATH)
@@ -2029,8 +2030,10 @@ async def _notice_one(guild_id: int, tag: str, url: str):
     if channel is None:
         return True  # nowhere to say it
     try:
-        await channel.send(f"🆕 **SuperDuperRaidBot {tag}** is available (this bot is v{VERSION}). On Windows, close the bot "
-                           f"and double-click `Update.bat`. What's new: <{url}>", allowed_mentions=discord.AllowedMentions.none())
+        how = ("To update, run `./docker-update.sh` in the bot's folder" if IN_DOCKER
+               else "On Windows, close the bot and double-click `Update.bat`")
+        await channel.send(f"🆕 **SuperDuperRaidBot {tag}** is available (this bot is v{VERSION}). {how}. "
+                           f"What's new: <{url}>", allowed_mentions=discord.AllowedMentions.none())
     except discord.HTTPException as err:
         log.warning("Update notice failed for guild %s: %s", guild_id, err)
         return False
@@ -3023,7 +3026,8 @@ async def status(interaction: discord.Interaction):
                  f" · **Log channel:** {'set' if db.setting(interaction.guild_id, 'log_channel') else 'none'}")
     if db.setting(interaction.guild_id, "update_notice") == "1" and _UPDATE["tag"]:
         newer = release_is_newer(_UPDATE["tag"])
-        lines.append(f"**Latest release:** {_UPDATE['tag']}" + (" (an update is available: close the bot and run `Update.bat`)" if newer else " (you're up to date)"))
+        how = "run `./docker-update.sh`" if IN_DOCKER else "close the bot and run `Update.bat`"
+        lines.append(f"**Latest release:** {_UPDATE['tag']}" + (f" (an update is available: {how})" if newer else " (you're up to date)"))
     if LAST_ERROR:
         lines.append(f"**Last problem:** <t:{int(LAST_ERROR[0])}:R> · {LAST_ERROR[1]} (details in raidbot.log)")
     else:
@@ -3863,7 +3867,12 @@ def preflight() -> None:
     print(f"Raid Bot v{VERSION}")
     print(f"  Folder:   {BASE_DIR}")
 
-    if not ENV_PATH.exists():
+    if IN_DOCKER and not TOKEN:
+        raise SystemExit("DISCORD_TOKEN isn't set. Put your settings in the .env file next to docker-compose.yml "
+                         "(see DOCKER.md), then run:  docker compose up -d")
+    if IN_DOCKER:
+        print("  Settings: from the .env file next to docker-compose.yml")
+    elif not ENV_PATH.exists():
         lookalikes = [p.name for p in BASE_DIR.iterdir()
                       if p.is_file() and p.name != ".env" and (p.suffix == ".env" or p.name.startswith(".env"))]
         msg = f"There is no file named exactly '.env' in {BASE_DIR}."
@@ -3876,7 +3885,8 @@ def preflight() -> None:
         if WINDOWS:
             msg += "\n(Tip: in File Explorer turn on View -> Show -> File name extensions, so you can see names like .env.txt.)"
         raise SystemExit(msg)
-    print("  Settings: .env found")
+    else:
+        print("  Settings: .env found")
 
     if not TOKEN:
         editor = "Notepad" if WINDOWS else "a text editor"
@@ -3927,11 +3937,13 @@ def preflight() -> None:
 
 
 def setup_logging() -> None:
-    """Console plus raidbot.log (1 MB x 5 files) next to the bot, so errors survive closing the window."""
+    """Console plus raidbot.log (1 MB x 5 files) next to the bot, so errors survive closing the window.
+
+    LOG_DIR moves the log file (Docker keeps it in the /data volume, next to the database)."""
     handlers: list[logging.Handler] = [logging.StreamHandler()]
     try:
         handlers.append(logging.handlers.RotatingFileHandler(
-            BASE_DIR / "raidbot.log", maxBytes=1_000_000, backupCount=5, encoding="utf-8"))
+            Path(os.getenv("LOG_DIR") or BASE_DIR) / "raidbot.log", maxBytes=1_000_000, backupCount=5, encoding="utf-8"))
     except OSError:
         pass  # read-only folder: console only
     logging.basicConfig(level=logging.INFO, handlers=handlers,

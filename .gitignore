@@ -12,3 +12,6 @@ icons/*.jpg
 icons/*.jpeg
 icons/*.webp
 dist/
+# Docker: everything in data/ is the bot's private data, except the note that explains the folder
+data/*
+!data/README.txt

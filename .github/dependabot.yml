@@ -22,3 +22,9 @@ updates:
     groups:
       github-actions:
         patterns: ["*"]
+
+  - package-ecosystem: docker           # the python base image in Dockerfile
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday

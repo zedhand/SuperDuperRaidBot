@@ -11,7 +11,7 @@ body:
     attributes:
       label: Bot version
       description: Shown by `/status` in Discord, or on the first line of the bot's window when it starts.
-      placeholder: "1.13.2"
+      placeholder: "1.13.3"
     validations:
       required: true
   - type: dropdown

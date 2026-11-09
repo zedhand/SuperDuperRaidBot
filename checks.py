@@ -24,7 +24,7 @@ PRESET_LABELS = {
     "wow_forever": "World of Warcraft: Forever",
 }
 
-USER_AGENT = "DiscordBot (https://github.com/zedhand/SuperDuperRaidBot, 1.13.2)"  # Discord blocks the default Python UA
+USER_AGENT = "DiscordBot (https://github.com/zedhand/SuperDuperRaidBot, 1.13.3)"  # Discord blocks the default Python UA
 
 # View Channels + Send Messages + Embed Links + Read Message History + Use External Emojis
 # + Create Public Threads + Send Messages in Threads (for the optional per-raid discussion threads)

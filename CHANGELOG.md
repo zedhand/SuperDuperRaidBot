@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.13.3
 Fixes from a full audit of 1.13.2. Nothing new to set up; every change keeps today's settings working.
 - **Reminders on closed raids.** A raid closed for sign-ups (by `/config autoclose` or `/raid close`) still gets its reminder. Before, turning on autoclose quietly stopped every reminder.
 - **Private channels stay private.**

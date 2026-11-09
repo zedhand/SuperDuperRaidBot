@@ -10,6 +10,8 @@ services:
     image: ghcr.io/zedhand/superduperraidbot:1.13.2
     container_name: raidbot
     restart: unless-stopped       # comes back after a crash, a reboot or a power cut
+    init: true                    # a tiny init passes on `docker stop`, so the bot logs out cleanly
+    stop_grace_period: 20s
     env_file: .env                # your token and settings; never copied into the image
     volumes:
       - ./data:/data              # raidbot.db, backups/ and raidbot.log

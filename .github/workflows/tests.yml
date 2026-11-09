@@ -6,25 +6,41 @@ on:
   pull_request:
   workflow_call:   # the release workflow runs these same checks before it builds
 
+permissions:
+  contents: read
+
 jobs:
   test:
-    name: Python ${{ matrix.python }} on ${{ matrix.os }}
+    name: Python ${{ matrix.python }} on ${{ matrix.os }} (${{ matrix.deps }} packages)
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        python: ["3.10", "3.12"]
+        python: ["3.10", "3.12", "3.14"]
+        deps: [pinned]
         include:
           - os: macos-latest
             python: "3.12"
+            deps: pinned
+          - os: ubuntu-latest      # what a brand-new install gets today (requirements.txt ranges, no constraints)
+            python: "3.14"
+            deps: latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: ${{ matrix.python }}
       - name: Install dependencies
-        run: python -m pip install -r requirements.txt
+        shell: bash
+        run: |
+          if [ "${{ matrix.deps }}" = pinned ]; then
+            python -m pip install -r requirements.txt -c constraints.txt
+          else
+            python -m pip install --upgrade -r requirements.txt
+          fi
       - name: Run every test suite (offline, no Discord token needed)
         run: python tests/run_all.py
 
@@ -32,35 +48,46 @@ jobs:
     name: Lint and security checks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
       - name: Install tools
-        run: python -m pip install -r requirements.txt ruff bandit pip-audit
+        run: python -m pip install -r requirements.txt -c constraints.txt ruff bandit pip-audit
       - name: Real errors only (unused names, undefined names, syntax)
         run: ruff check --isolated --select F,E9 .
       - name: Security scan (medium severity and above)
         run: bandit -q -ll -r bot.py db.py checks.py embeds.py wow_data.py setup.py
       - name: Known vulnerabilities in dependencies
-        run: pip-audit -r requirements.txt
+        run: |
+          pip-audit -r requirements.txt
+          pip-audit -r constraints.txt   # the exact versions the Docker image ships
 
   docker:
     name: Docker image (PC and Raspberry Pi)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: docker/setup-qemu-action@v4      # lets the PC runner build the Raspberry Pi (arm64) image too
-      - uses: docker/setup-buildx-action@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1  # v4.4.0 (lets the PC runner build the Raspberry Pi arm64 image too)
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
       - name: Build for amd64 and arm64 (not pushed anywhere)
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: false
-      - name: Starts and explains a missing token instead of crashing
+      - name: Starts and explains a missing token instead of crashing (PC and Raspberry Pi images)
         run: |
-          docker build -t raidbot:ci .
-          out=$(docker run --rm raidbot:ci 2>&1) && exit 1 || true
-          echo "$out"
-          echo "$out" | grep -q "DISCORD_TOKEN isn't set"
+          for arch in amd64 arm64; do
+            docker buildx build --platform "linux/$arch" --load -t "raidbot:ci-$arch" .
+            out=$(docker run --rm --platform "linux/$arch" "raidbot:ci-$arch" 2>&1) && exit 1 || true
+            echo "$arch: $out"
+            echo "$out" | grep -q "DISCORD_TOKEN isn't set"
+            # every module imports and the database opens inside the image, on that architecture
+            docker run --rm --platform "linux/$arch" -e DB_PATH=/tmp/ci.db --entrypoint python "raidbot:ci-$arch" \
+              -c "import bot, db, embeds, checks, wow_data; print('imports ok on', '$arch')"
+          done

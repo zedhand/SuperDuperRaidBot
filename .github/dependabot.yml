@@ -4,7 +4,7 @@
 # Settings -> Code security.)
 version: 2
 updates:
-  - package-ecosystem: pip              # requirements.txt (discord.py, python-dotenv, tzdata)
+  - package-ecosystem: pip              # requirements.txt ranges and the exact versions in constraints.txt
     directory: /
     schedule:
       interval: weekly

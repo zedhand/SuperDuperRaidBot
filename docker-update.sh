@@ -21,6 +21,15 @@ main() {
         exit 1
     fi
     echo "Latest release: $tag"
+    changed=$(git status --porcelain --untracked-files=no)
+    if [ -n "$changed" ]; then
+        echo "These files were changed by hand, so updating would overwrite them:"
+        echo "$changed"
+        echo "Put your own settings in .env instead. To undo the edits:  git checkout -- <file>   (or keep a copy"
+        echo "with:  git stash ), then run ./docker-update.sh again."
+        exit 1
+    fi
+    prev=$(git describe --tags --always)
     git fetch --quiet --tags origin
     if git cat-file -e "$tag:docker-compose.yml" 2>/dev/null; then
         git -c advice.detachedHead=false checkout --quiet "$tag"
@@ -45,8 +54,11 @@ main() {
         docker compose up -d --build
     fi
 
-    docker image prune -f > /dev/null   # remove the previous version's leftover image layers
+    docker image prune -f > /dev/null   # remove unnamed leftover layers (the previous version's image is kept)
     echo "Done. Watch it start with:  docker compose logs -f   (Ctrl+C stops watching; the bot keeps running)"
+    if [ "$prev" != "$(git describe --tags --always)" ]; then
+        echo "To go back to the version you had:  git checkout $prev && docker compose up -d"
+    fi
 }
 
 main "$@"

@@ -6,10 +6,10 @@ name: Release
 #   3. builds SuperDuperRaidBot-v<version>.zip exactly like the hand-made releases and scans it for secrets,
 #   4. creates a DRAFT release with the zip attached and the CHANGELOG section as the notes,
 #   5. builds the Docker image for PCs (amd64) and the Raspberry Pi (arm64) and pushes it to
-#      ghcr.io/zedhand/superduperraidbot:<version> (for example :1.13.2, and :1.13 for the newest 1.13.x).
+#      ghcr.io/zedhand/superduperraidbot:<version> (for example :1.13.2). It never replaces an existing version.
 # Nothing is public until you open the draft on GitHub, check the notes and press "Publish release".
 # Update.bat and docker-update.sh only see published releases, so a draft never reaches anyone, and the image's
-# :latest tag only moves when the release is published (docker-latest.yml).
+# :latest and :major.minor tags only move when the release is published (docker-latest.yml).
 
 on:
   push:
@@ -35,8 +35,10 @@ jobs:
     outputs:
       version: ${{ steps.build.outputs.version }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
       - name: Build and scan the zip
@@ -74,9 +76,11 @@ jobs:
       contents: read
       packages: write   # needed to push to ghcr.io (the repository's own package)
     steps:
-      - uses: actions/checkout@v7
-      - uses: docker/setup-qemu-action@v4      # lets the PC runner build the Raspberry Pi (arm64) image too
-      - uses: docker/setup-buildx-action@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1  # v4.4.0 (lets the PC runner build the Raspberry Pi arm64 image too)
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
       - name: Work out the image tags
         id: tags
         env:
@@ -84,18 +88,28 @@ jobs:
           IMAGE: ghcr.io/${{ github.repository }}
         run: |
           image=$(echo "$IMAGE" | tr '[:upper:]' '[:lower:]')   # image names must be lower case
-          minor=${VERSION%.*}
+          # Only the exact version is pushed here. The moving :1.13 and :latest tags follow when the release is
+          # published (docker-latest.yml), so a draft that is deleted never moves them.
           {
             echo "image=$image"
-            echo "tags=$image:$VERSION,$image:$minor"
+            echo "tags=$image:$VERSION"
           } >> "$GITHUB_OUTPUT"
       - name: Log in to ghcr.io
         env:
           TOKEN: ${{ github.token }}
           OWNER: ${{ github.repository_owner }}
         run: echo "$TOKEN" | docker login ghcr.io -u "$OWNER" --password-stdin
+      - name: Never replace an image that was already published
+        env:
+          IMAGE: ${{ steps.tags.outputs.image }}
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          if docker buildx imagetools inspect "$IMAGE:$VERSION" > /dev/null 2>&1; then
+            echo "::error::$IMAGE:$VERSION already exists. People may have pulled it, so it isn't replaced. Release a new version number instead."
+            exit 1
+          fi
       - name: Build and push for amd64 and arm64
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -116,4 +130,4 @@ jobs:
           TAGS: ${{ steps.tags.outputs.tags }}
         run: |
           echo "Docker image pushed: $TAGS" >> "$GITHUB_STEP_SUMMARY"
-          echo ":latest moves to it when you publish the release." >> "$GITHUB_STEP_SUMMARY"
+          echo ":latest and the :major.minor tag move to it when you publish the release." >> "$GITHUB_STEP_SUMMARY"

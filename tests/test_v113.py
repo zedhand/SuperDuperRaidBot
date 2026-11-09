@@ -80,10 +80,11 @@ G = 1
 
 
 class FakeResp:
-    def __init__(self): self.sent = []; self.edited = []
+    def __init__(self): self.sent = []; self.edited = []; self.deferred = False
     async def send_message(self, *a, **k): self.sent.append((a, k))
     async def edit_message(self, **k): self.edited.append(k)
-    def is_done(self): return bool(self.sent or self.edited)
+    async def defer(self, **k): self.deferred = True
+    def is_done(self): return bool(self.sent or self.edited or self.deferred)
 
 
 class FakeMsg:
@@ -132,8 +133,11 @@ officer, nobody, raider = member(1, admin=True), member(2), member(50)
 
 def inter(user):
     ch = CH[11]
-    return types.SimpleNamespace(user=user, guild_id=G, guild=ch.guild, channel=ch, channel_id=11, response=FakeResp(),
-                                 command=None, message=None)
+    resp = FakeResp()
+
+    async def follow(*a, **k): resp.sent.append((a, k))  # after a defer, the answer lands where tests look for it
+    return types.SimpleNamespace(user=user, guild_id=G, guild=ch.guild, channel=ch, channel_id=11, response=resp,
+                                 command=None, message=None, followup=types.SimpleNamespace(send=follow))
 
 
 def text(i):

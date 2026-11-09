@@ -259,5 +259,138 @@ d3 = dbmod.DB(str(odd / "r.db"))
 d3.conn.close()
 check("a healthy database there passes the check", dbmod.file_is_healthy(odd / "r.db"))
 
+
+# ------------------------------------------------------------------ reliability
+print("a repeating raid keeps trying (with longer waits) instead of stopping after 5 minutes")
+B._tries.clear(); B._not_before.clear()
+fails = {"n": 0}
+
+
+async def always_fail():
+    fails["n"] += 1
+    return False
+for _ in range(B.MAX_TRIES + 2):
+    B._not_before.clear()  # pretend each wait has passed
+    done = run(B._attempt("repeat", 4242, always_fail, B.REPEAT_MAX_TRIES, backoff=True))
+check("still trying after more than MAX_TRIES failures", not done and fails["n"] == B.MAX_TRIES + 2, fails)
+before = fails["n"]
+run(B._attempt("repeat", 4242, always_fail, B.REPEAT_MAX_TRIES, backoff=True))
+check("but not every minute: it waits between tries", fails["n"] == before)
+check("the wait grows, up to an hour", 0 < B._not_before[("repeat", 4242)] - time.time() <= 3600)
+B._tries.clear(); B._not_before.clear()
+
+print("moving a raid sends the DM reminders again")
+e = raid("Moves", 11, 120)
+B._dm_sent.update({(e, 10), (e, 11), (e + 1000, 10)})
+B.parse_start_checked = lambda g, d, a, **k: (NOW + 3 * 3600, None)
+i = inter(officer, CH[11])
+run(B.raid_edit.callback(i, e, date="2099-01-01", notify=False))
+check("that raid's DM record is cleared", not any(k[0] == e for k in B._dm_sent) and (e + 1000, 10) in B._dm_sent, B._dm_sent)
+check("the officer was answered", "Updated event" in said(i), said(i))
+
+print("the 'raid moved' message fits in one Discord message")
+for uid in range(10 ** 17, 10 ** 17 + 100):  # real Discord ids are 17-19 digits
+    db.set_signup(e, uid, f"P{uid}", "Mage", "Frost", "ranged", "in", None)
+CH[11].sent.clear()
+B.parse_start_checked = lambda g, d, a, **k: (NOW + 4 * 3600, None)
+run(B.raid_edit.callback(inter(officer, CH[11]), e, date="2099-01-01", title="A" * 200))
+moved = [a[0] for a, _ in CH[11].sent if a and "moved to" in str(a[0])]
+check("sent, and under 2000 characters with '…and N more'", moved and len(moved[0]) <= 2000 and "more" in moved[0],
+      [len(m) for m in moved])
+
+print("a voice check long after its time is skipped")
+db.set_setting(G, "voice_channel", 555)
+vc = raid("Voice raid", 11, -180)
+CH[555] = types.SimpleNamespace(id=555, members=[alice])
+db.set_signup(vc, 11, "Placeholdrin", "Rogue", "Subtlety", "melee", "in", None)
+result = run(B._voicecheck_one(db.event(vc), NOW))
+check("done without marking anyone (the bot was offline when it was due)", result is True and not db.signup(vc, 11)["no_show"])
+db.set_setting(G, "voice_channel", None)
+
+print("bench promotion reads each signup fresh")
+bp = db.create_event(G, 11, "Bench", "", NOW + 7200, 1, 0, 1, 0)
+db.set_message_id(bp, 9100)
+db.set_signup(bp, 30, "Healone", "Priest", "Holy", "healer", "absent", None)
+db.set_signup(bp, 31, "Healtwo", "Priest", "Holy", "healer", "bench", "in")
+db.set_signup(bp, 32, "Healthree", "Priest", "Holy", "healer", "bench", "in")
+real_signups, told = db.signups, []
+db.signups = lambda eid: (real_signups(eid), db.set_signup(bp, 31, "Healtwo", "Priest", "Holy", "healer", "absent", None))[0]
+
+
+async def tell(event, uid, text): told.append(uid)
+B.tell_player = tell
+run(B.promote_bench(bp))
+db.signups = real_signups
+check("someone who pressed Absent meanwhile stays absent", db.signup(bp, 31)["status"] == "absent")
+check("the next in line gets the slot instead", db.signup(bp, 32)["status"] == "in" and told == [32], told)
+
+print("the scheduler doesn't trust a redraw that's still in flight")
+B._refreshing[777] = False
+check("refresh_now waits a minute instead of reporting success", run(B.refresh_now(777)) == B.WAIT)
+B._refreshing.pop(777, None)
+
+print("posting a raid that fails with a network error leaves nothing behind")
+
+
+class Boom(Exception):
+    pass
+
+
+class BadChan(Chan):
+    async def send(self, *a, **k): raise Boom()
+CH[61] = BadChan(61)
+count = len(db.upcoming_events(G, NOW))
+try:
+    run(B.post_event(CH[61], GUILD, 1, "Net fail", "", NOW + 9000, 0, 0, 0))
+    raised = False
+except Boom:
+    raised = True
+check("the error comes through and no raid row is left", raised and len(db.upcoming_events(G, NOW)) == count)
+
+print("one Discord event per raid even when two syncs overlap")
+calls = []
+
+
+async def slow_sync(eid, now=None):
+    calls.append(("start", eid))
+    await asyncio.sleep(0.01)
+    calls.append(("end", eid))
+    return True
+real_inner, B._sync_sched_event = B._sync_sched_event, slow_sync
+
+
+async def both():
+    await asyncio.gather(B.sync_sched_event(5), B.sync_sched_event(5))
+run(both())
+B._sync_sched_event = real_inner
+check("the second waits for the first", calls == [("start", 5), ("end", 5), ("start", 5), ("end", 5)], calls)
+
+print("settings that redraw every post answer first")
+order = []
+
+
+async def redraw(g): order.append("redraw")
+B.redraw_open_posts = redraw
+i = inter(officer)
+real_send = i.response.send_message
+
+
+async def send(*a, **k):
+    order.append("answer")
+    await real_send(*a, **k)
+i.response.send_message = send
+run(B.config_buffs.callback(i, True))
+check("/config buffs answers before redrawing", order == ["answer", "redraw"], order)
+
+print("only one copy of the bot")
+first = B.single_instance(str(tmp / "one.db"))
+check("the first copy gets the lock", first is not None)
+import subprocess  # noqa: E402
+code = ("import sys; sys.path.insert(0, %r); import os; os.environ['DB_PATH'] = %r; import bot; "
+        "print('second' if bot.single_instance(%r) is None else 'got-it')") % (str(proj), str(tmp / "x.db"), str(tmp / "one.db"))
+r = subprocess.run([sys.executable, "-I", "-c", code], cwd=proj, capture_output=True, text=True, env={**os.environ})
+check("a second copy is refused", r.stdout.strip().endswith("second"), r.stdout[-200:] + r.stderr[-300:])
+first.close()
+
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

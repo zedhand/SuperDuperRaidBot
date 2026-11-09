@@ -31,8 +31,14 @@ try {
     $remote = ([string]$rel.tag_name).TrimStart("v")
     Say "Latest release:   $remote"
 
-    $newer = $true
-    try { $newer = ([version]$remote -gt [version]$local) } catch { }
+    # An unknown installed version counts as older; a release number that can't be read never counts as newer
+    # (so a malformed tag can't downgrade you). -Force installs anyway.
+    $newer = $false
+    if (-not $local) { $newer = $true }
+    else {
+        try { $newer = ([version]$remote -gt [version]$local) }
+        catch { Say "Couldn't compare '$remote' with '$local'. Run with -Force to install it anyway." }
+    }
     if (-not $newer -and -not $Force) {
         Say "You're already up to date."
         exit 0
@@ -45,6 +51,12 @@ try {
         Say ""
         Say "Close the bot window first. It can't be updated while it is running."
         Read-Host "Press Enter to update (or close this window to cancel)" | Out-Null
+    }
+    # The running bot holds raidbot.db.lock open. If it can't be opened on its own, the bot is still running.
+    $lockFile = Join-Path $here "raidbot.db.lock"
+    if (Test-Path $lockFile) {
+        try { [IO.File]::Open($lockFile, "Open", "ReadWrite", "None").Dispose() }
+        catch { throw "The bot is still running. Close its window (or stop it in Task Manager), then run Update.bat again. Nothing was changed." }
     }
 
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ("raidbot-update-" + [guid]::NewGuid().ToString("N"))
@@ -90,15 +102,26 @@ try {
     New-Item -ItemType Directory $backup -Force | Out-Null
     $code = @("bot.py", "checks.py", "db.py", "embeds.py", "wow_data.py", "setup.py", "start.bat",
               "requirements.txt", "README.md", "LICENSE", "CHANGELOG.md", "SECURITY.md", "Shortcuts.bat", "DOCKER.md")
-    foreach ($f in $code) {
+    foreach ($f in ($code + @("Update.bat", "update.ps1"))) {
         $p = Join-Path $here $f
         if (Test-Path $p) { Copy-Item $p $backup }
     }
 
-    # Install the new program files.
-    foreach ($f in $code) {
-        $p = Join-Path $src.FullName $f
-        if (Test-Path $p) { Copy-Item $p (Join-Path $here $f) -Force }
+    # Install the new program files. If anything fails part-way, put the previous version back, so the folder
+    # is never left half old and half new.
+    try {
+        foreach ($f in $code) {
+            if ($f -eq "setup.py" -and -not (Test-Path (Join-Path $here $f))) { continue }  # deleted after first-run setup
+            $p = Join-Path $src.FullName $f
+            if (Test-Path $p) { Copy-Item $p (Join-Path $here $f) -Force }
+        }
+    }
+    catch {
+        foreach ($f in $code) {
+            $b = Join-Path $backup $f
+            if (Test-Path $b) { Copy-Item $b (Join-Path $here $f) -Force -ErrorAction SilentlyContinue }
+        }
+        throw ("Couldn't copy the new files (" + $_.Exception.Message + "). The previous version was put back.")
     }
     $iconsReadme = Join-Path $src.FullName "icons\README.txt"
     if (Test-Path $iconsReadme) {
@@ -116,6 +139,9 @@ try {
     if (-not $SkipDeps -and (Test-Path $venvPython)) {
         Say "Updating components..."
         & $venvPython -m pip install -q -r (Join-Path $here "requirements.txt")
+        if ($LASTEXITCODE -ne 0) {
+            Say "WARNING: updating the Python components failed (no internet?). start.bat tries again when the bot starts."
+        }
     }
 
     Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue

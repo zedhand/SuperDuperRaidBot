@@ -102,7 +102,8 @@ program = {p.name for p in root.glob("*.py")} - {"setup.py"}  # the wizard isn't
 copied = set(re.findall(r"\b(\w+\.py)\b", next(l for l in dockerfile.splitlines() if l.startswith("COPY bot.py"))))
 check("the Dockerfile copies every program file", program <= copied, sorted(program - copied))
 check(".dockerignore lets exactly those files through (so nothing private reaches an image)",
-      allowed == program | {"Dockerfile", "requirements.txt"}, sorted(allowed ^ (program | {"Dockerfile", "requirements.txt"})))
+      allowed == program | {"Dockerfile", "requirements.txt", "constraints.txt"},
+      sorted(allowed ^ (program | {"Dockerfile", "requirements.txt", "constraints.txt"})))
 check(".dockerignore leaves everything else out", "*" in (root / ".dockerignore").read_text(encoding="utf-8").splitlines())
 compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
 check("docker-compose.yml reads the token from .env and keeps data in ./data", "env_file: .env" in compose and "./data:/data" in compose)

@@ -361,8 +361,10 @@ async def fake_spawn(event):
 real_spawn, B.spawn_next = B.spawn_next, fake_spawn
 tick()
 check("first failure: still scheduled to retry", db.event(r)["repeated"] == 0)
+B._not_before.clear()  # the backoff wait has passed
 tick()
 check("second failure: still scheduled", db.event(r)["repeated"] == 0)
+B._not_before.clear()
 tick()
 check("success: marked posted", db.event(r)["repeated"] == 1 and len(calls) == 3)
 tick()

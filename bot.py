@@ -3623,20 +3623,21 @@ async def config_logchannel(interaction: discord.Interaction, channel: Optional[
         ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
 
-@config.command(name="backup", description="Get a copy of the bot's database (only you see it)")
+@config.command(name="backup", description="Get a copy of this server's data (only you see it)")
 async def config_backup(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     with tempfile.TemporaryDirectory() as folder:
         path = Path(folder) / f"raidbot-{datetime.now():%Y-%m-%d-%H%M}.db"
-        db.snapshot_to(path)
+        db.snapshot_for_guild(path, interaction.guild_id)  # never another server's raids, players or settings
         size = path.stat().st_size
         if size > 8 * 1024 * 1024:
             return await interaction.followup.send(
-                f"The database is {size // 1024 // 1024} MB, too big to attach. Daily copies are in the `backups` "
+                f"This server's data is {size // 1024 // 1024} MB, too big to attach. Daily copies are in the `backups` "
                 "folder next to the bot.", ephemeral=True)
         await interaction.followup.send(
-            "Here is a copy of the database (characters, raids, signups, settings). It contains your members' "
-            "Discord IDs, so keep it private. To restore it, stop the bot and replace `raidbot.db` with this file.",
+            "Here is a copy of this server's data (raids, signups, characters, settings). It contains your members' "
+            "Discord IDs, so keep it private. To restore it, stop the bot and replace `raidbot.db` with this file "
+            "(it only holds this server's data, so if the bot runs in other servers too, use the `backups` folder instead).",
             file=discord.File(io.BytesIO(path.read_bytes()), filename=path.name), ephemeral=True)
 
 

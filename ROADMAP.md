@@ -7,7 +7,7 @@ Shipped versions are listed in [CHANGELOG.md](CHANGELOG.md). Ideas below are ope
 
 ## Planned, in build order
 
-Everything below is optional and off by default unless noted. One release (v1.14.0) will roll up both batches.
+Everything below is optional and off by default unless noted. Items 1-13 shipped together in v1.13.0; item 14 comes later.
 
 ### v1.13 "safety net"
 | # | Feature | Why | Effort | Status |

@@ -114,10 +114,11 @@ print("version comparison")
 check("'v1.12.0' is read as numbers", B.parse_version("v1.12.0") == (1, 12, 0, 0) and B.parse_version("1.12") == (1, 12, 0, 0))
 check("beta tags, junk and nothing are not versions", all(B.parse_version(x) is None for x in ("v1.12.0-beta", "latest", "", None, "v1..2", "1.2.3.4.5")))
 check("1.10 is newer than 1.9 (numbers, not text)", B.parse_version("1.10.0") > B.parse_version("1.9.0"))
-check("this version is 1.12.0", B.VERSION == "1.12.0")
+real_version, B.VERSION = B.VERSION, "1.12.0"  # compare against a fixed version so later releases don't break this
 for tag, want in (("v1.12.1", True), ("v1.12.0", False), ("v1.11.9", False), ("v1.13.0", True), ("v2.0", True),
                   ("1.12.0-rc1", False), ("nightly", False), (None, False), ("v1.12", False)):
     check(f"{tag!r} newer than {B.VERSION}: {want}", B.release_is_newer(tag) is want)
+B.VERSION = real_version
 
 # ------------------------------------------------------------ the outside-lookup helper
 print("http_get_json fails safely")

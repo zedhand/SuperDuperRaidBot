@@ -1,6 +1,7 @@
 # Changelog
 
-## Unreleased
+## 1.13.2
+A small Docker follow-up: the Raspberry Pi now downloads a ready-made image instead of building the bot on every update.
 - **Ready-made Docker image.** Every release now comes with an image for the Raspberry Pi (arm64) and PCs (amd64) at `ghcr.io/zedhand/superduperraidbot`, so `./docker-update.sh` just downloads it instead of building the bot on the Pi. Building it yourself still works: `./docker-update.sh --build` (see [DOCKER.md](DOCKER.md)), and the script falls back to that by itself if the download fails.
 
 ## 1.13.1

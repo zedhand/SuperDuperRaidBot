@@ -74,7 +74,8 @@ class FakeChannel:
     def __init__(self, cid):
         self.id, self.category_id, self.mention, self.name = cid, None, f"<#{cid}>", f"chan{cid}"
         self.sent, self.edits, self.fail_send = [], 0, None
-        self.guild = types.SimpleNamespace(id=G, me=object(), get_role=lambda r: None)
+        self.guild = types.SimpleNamespace(id=G, me=object(), get_role=lambda r: None,
+                                           get_member=lambda u: types.SimpleNamespace(id=u))
 
     async def send(self, *a, **k):
         if self.fail_send:

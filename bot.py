@@ -77,7 +77,8 @@ USERS_ONLY = discord.AllowedMentions(everyone=False, roles=False, users=True)
 
 intents = discord.Intents.default()
 intents.members = True  # needed for /raid unsigned; enable "Server Members Intent" in the dev portal
-bot = commands.Bot(command_prefix=commands.when_mentioned, intents=intents)  # slash-only; no message-content intent needed
+bot = commands.Bot(command_prefix=commands.when_mentioned, intents=intents,
+                   allowed_mentions=USERS_ONLY)  # slash-only; no message-content intent needed
 
 
 # ---------------------------------------------------------------- helpers
@@ -151,6 +152,15 @@ def can_manage_channel(interaction: discord.Interaction, channel) -> bool:
         return True
     mine = {r.id for r in getattr(interaction.user, "roles", [])}
     return any(r in mine for r in scoped_role_ids(interaction.guild_id, channel, "officer_role"))
+
+
+def may_mention_everyone(interaction: discord.Interaction) -> bool:
+    """True if this person could ping @everyone or a non-mentionable role themselves. The bot may hold that
+    permission, so an officer without it mustn't be able to borrow it through /raid create ping:."""
+    for perms in (getattr(interaction, "permissions", None), getattr(interaction.user, "guild_permissions", None)):
+        if perms is not None and (getattr(perms, "mention_everyone", False) or getattr(perms, "administrator", False)):
+            return True
+    return False
 
 
 def holds_scoped_officer_role(interaction: discord.Interaction) -> bool:
@@ -941,6 +951,8 @@ async def event_autocomplete(interaction: discord.Interaction, current: str):
         if not can_manage_channel(interaction, e["channel_id"]):
             continue
         ch = bot.get_channel(e["channel_id"])
+        if not user_sees(ch, interaction.user):
+            continue  # only raids this person can actually see
         when = datetime.fromtimestamp(e["start_ts"], tz).strftime("%b %d %H:%M")
         label = f"#{ch.name if ch else 'deleted-channel'} · {e['title']} · {when} (#{e['id']})"
         if current.lower() in label.lower():
@@ -1245,6 +1257,11 @@ async def raid_create(interaction: discord.Interaction, date: str, at: Optional[
     def pick(value, key, default=0):
         return value if value is not None else (tpl[key] if tpl else default)
 
+    if ping is not None and (ping.is_default() or not ping.mentionable) and not may_mention_everyone(interaction):
+        return await interaction.response.send_message(
+            f"You can only ping {'everyone' if ping.is_default() else ping.name} if you have 'Mention @everyone, "
+            "@here and All Roles' yourself. Pick a mentionable role, or leave `ping` empty to use the default.",
+            ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
     await interaction.response.defer(ephemeral=True)
     if ping is None and (default_ping := default_ping_role_id(interaction.guild_id, interaction.channel)):
         ping = interaction.guild.get_role(default_ping)
@@ -1325,7 +1342,10 @@ async def seed_series(event_id: int, series_id: int) -> None:
     if not members:
         return
     event = db.event(event_id)
+    channel = bot.get_channel(event["channel_id"])
     for m in members:
+        if channel is not None and not member_can_view(channel, m["user_id"]):
+            continue  # left the server or lost access to the channel: they stay in the series but aren't signed up
         status, bench_from = apply_cap(event, m["user_id"], m["role"], "in", m["wow_class"])
         db.set_signup(event_id, m["user_id"], m["char_name"], m["wow_class"], m["spec"], m["role"], status, bench_from)
     await refresh_message(event_id)
@@ -1553,6 +1573,11 @@ async def raid_add(interaction: discord.Interaction, event_id: int, member: disc
         return await interaction.response.send_message("Bots can't sign up.", ephemeral=True)
     st = status.value if status else "in"
     quiet = discord.AllowedMentions.none()
+    raid_channel = bot.get_channel(event["channel_id"])
+    if st != "absent" and raid_channel is not None and not raid_channel.permissions_for(member).view_channel:
+        return await interaction.response.send_message(
+            f"{member.display_name} can't see the raid's channel, so they couldn't see the post or its reminders. "
+            "Give them access to the channel first.", ephemeral=True)
     if st == "absent":
         db.set_signup(event_id, member.id, None, None, None, None, "absent")
         text = f"Marked {member.mention} as absent for **{event['title']}**."
@@ -1965,10 +1990,13 @@ async def _remind_one(event, now: int):
         return WAIT  # nobody to remind yet: keep the reminder for when the first person signs up
     link = f"https://discord.com/channels/{event['guild_id']}/{event['channel_id']}/{event['message_id']}"
     ping_users = []
+    channel = bot.get_channel(event["channel_id"])
     for uid in users:
         if not wants_dm(event["guild_id"], uid):
             ping_users.append(uid)
         elif (event["id"], uid) not in _dm_sent:
+            if not member_can_view(channel, uid):
+                continue  # left the server or lost access to the channel: don't DM them the raid
             try:
                 await (await bot.fetch_user(uid)).send(f"⏰ **{event['title']}** starts <t:{event['start_ts']}:R>! {link}")
                 _dm_sent.add((event["id"], uid))
@@ -1978,7 +2006,6 @@ async def _remind_one(event, now: int):
         _dm_sent.clear()
     if not ping_users:
         return True
-    channel = bot.get_channel(event["channel_id"])
     if channel is None:
         return True
     try:
@@ -2252,18 +2279,53 @@ _board_soon: set[int] = set()  # guilds with a redraw already waiting
 _board_tasks: set = set()  # keeps the waiting redraws alive until they run
 
 
+def is_private_thread(channel) -> bool:
+    return getattr(channel, "type", None) == discord.ChannelType.private_thread
+
+
+def member_can_view(channel, user_id: int) -> bool:
+    """True if this member of the channel's server can see the channel. False when the channel is gone, the
+    person isn't in the server any more, or it's a private thread they aren't in."""
+    if channel is None:
+        return False
+    guild = getattr(channel, "guild", None)
+    member = guild.get_member(user_id) if guild is not None and hasattr(guild, "get_member") else None
+    if member is None:
+        return False
+    if is_private_thread(channel):
+        if getattr(channel, "owner_id", None) == user_id:
+            return True
+        if any(getattr(m, "id", None) == user_id for m in (getattr(channel, "members", None) or [])):
+            return True
+        return bool(channel.permissions_for(member).manage_threads)
+    return bool(channel.permissions_for(member).view_channel)
+
+
+def user_sees(channel, user) -> bool:
+    """True if this member can see the channel (for a private thread: is in it, or can manage threads)."""
+    if channel is None:
+        return False
+    if is_private_thread(channel):
+        return member_can_view(channel, user.id)
+    return bool(channel.permissions_for(user).view_channel)
+
+
 def board_can_show(board_channel, raid_channel_id: int) -> bool:
-    """A raid goes on the board only if everyone who can read the board can also see the raid's channel (checked
-    role by role), so a raid in an officers-only or team-only channel never shows up on a public board. The
-    low-signup alert uses the same rule for its channel."""
+    """A raid goes on the board only if everyone who can read the board can also see the raid's channel, so a raid
+    in an officers-only or team-only channel never shows up on a public board. Checked role by role first (fast),
+    then member by member, which also catches member-only overwrites and role combinations. A raid in a private
+    thread is never shown. The low-signup alert uses the same rule for its channel."""
     if raid_channel_id == board_channel.id:
         return True
     raid_channel = bot.get_channel(raid_channel_id)
-    if raid_channel is None:
+    if raid_channel is None or is_private_thread(raid_channel):
         return False
     roles = getattr(board_channel.guild, "roles", None) or [board_channel.guild.default_role]
-    return not any(board_channel.permissions_for(r).view_channel and not raid_channel.permissions_for(r).view_channel
-                   for r in roles)
+    if any(board_channel.permissions_for(r).view_channel and not raid_channel.permissions_for(r).view_channel
+           for r in roles):
+        return False
+    readers = getattr(board_channel, "members", None) or []
+    return all(raid_channel.permissions_for(m).view_channel for m in readers)
 
 
 def board_raids(guild_id: int, board_channel, now: int) -> tuple[list, int]:
@@ -2465,12 +2527,15 @@ def sched_length(guild_id: int) -> int:
 
 def sched_can_show(guild, raid_channel_id: int) -> bool:
     """Every member of the server can see its Scheduled Events, so a raid gets one only if every role (@everyone
-    included) can see the raid's channel. A raid in an officers-only or team-only channel never gets one."""
+    included) and every member can see the raid's channel. A raid in an officers-only or team-only channel, or in a
+    private thread, never gets one."""
     channel = bot.get_channel(raid_channel_id) if guild is not None else None
-    if channel is None:
+    if channel is None or is_private_thread(channel):
         return False
     roles = getattr(guild, "roles", None) or [guild.default_role]
-    return all(channel.permissions_for(r).view_channel for r in roles)
+    if not all(channel.permissions_for(r).view_channel for r in roles):
+        return False
+    return all(channel.permissions_for(m).view_channel for m in (getattr(guild, "members", None) or []))
 
 
 def sched_can_manage(guild) -> bool:
@@ -2740,6 +2805,14 @@ async def stats_me(interaction: discord.Interaction, days: app_commands.Range[in
         ephemeral=True)
 
 
+def stats_scope(interaction: discord.Interaction, since_ts: int, until_ts: int):
+    """None for a full officer (every raid in the server); otherwise the channels this channel-scoped raid leader
+    manages, so they never see attendance for another team's raids."""
+    if is_officer(interaction):
+        return None
+    return [c for c in db.event_channels(interaction.guild_id, since_ts, until_ts) if can_manage_channel(interaction, c)]
+
+
 @stats.command(name="team", description="Everyone's attendance (officers only)")
 @app_commands.describe(days="How far back to look (default 90)")
 async def stats_team(interaction: discord.Interaction, days: app_commands.Range[int, 7, 730] = 90):
@@ -2747,7 +2820,8 @@ async def stats_team(interaction: discord.Interaction, days: app_commands.Range[
         return await interaction.response.send_message("Only raid officers can see everyone's attendance. "
                                                        "Use `/stats me` for your own.", ephemeral=True)
     now = int(time.time())
-    rows = db.stats(interaction.guild_id, now - days * 86400, now)
+    rows = db.stats(interaction.guild_id, now - days * 86400, now,
+                    channel_ids=stats_scope(interaction, now - days * 86400, now))
     if not rows:
         return await interaction.response.send_message("No finished raids with signups in that period.", ephemeral=True)
     def who(uid: int) -> str:  # a name always renders; a mention shows "unknown-user" if the viewer's client hasn't loaded them
@@ -2772,7 +2846,8 @@ async def stats_export(interaction: discord.Interaction, days: app_commands.Rang
     if not (is_officer(interaction) or holds_scoped_officer_role(interaction)):
         return await interaction.response.send_message("Only raid officers can export attendance.", ephemeral=True)
     now = int(time.time())
-    rows = db.stats(interaction.guild_id, now - days * 86400, now)
+    rows = db.stats(interaction.guild_id, now - days * 86400, now,
+                    channel_ids=stats_scope(interaction, now - days * 86400, now))
     if not rows:
         return await interaction.response.send_message("No finished raids with signups in that period.", ephemeral=True)
     out = io.StringIO()
@@ -2911,6 +2986,8 @@ async def recurring_autocomplete(interaction: discord.Interaction, current: str)
     out = []
     for e in db.upcoming_recurring(interaction.guild_id, int(time.time())):
         ch = bot.get_channel(e["channel_id"])
+        if not user_sees(ch, interaction.user):
+            continue  # only raids this person can actually see
         when = datetime.fromtimestamp(e["start_ts"], tz).strftime("%b %d %H:%M")
         label = f"#{ch.name if ch else 'deleted-channel'} · {e['title']} · {when} ({repeat_label(e['repeat_days'])})"
         if current.lower() in label.lower():
@@ -2933,7 +3010,9 @@ async def my_series_autocomplete(interaction: discord.Interaction, current: str)
 @app_commands.autocomplete(event_id=recurring_autocomplete, character=own_char_autocomplete)
 async def always_join(interaction: discord.Interaction, event_id: int, character: Optional[str] = None):
     event = db.event(event_id)
-    if not event or event["guild_id"] != interaction.guild_id or not event["repeat_days"]:
+    ch = bot.get_channel(event["channel_id"]) if event else None
+    if (not event or event["guild_id"] != interaction.guild_id or not event["repeat_days"]
+            or not user_sees(ch, interaction.user)):
         return await interaction.response.send_message(
             "That isn't a repeating raid. Pick one from the list.", ephemeral=True)
     if not may_sign_up(interaction):
@@ -3312,6 +3391,10 @@ async def config_channel(interaction: discord.Interaction,
                          ping: Optional[discord.Role] = None, officer: Optional[discord.Role] = None,
                          clear: bool = False,
                          voice: Optional[Union[discord.VoiceChannel, discord.StageChannel]] = None):
+    if officer is not None and officer.is_default():
+        return await interaction.response.send_message(
+            "@everyone can't be a channel's officer role: every member could then manage its raids. Pick a real role.",
+            ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
     tgt = target or interaction.channel
     if isinstance(tgt, discord.Thread):
         tgt = tgt.parent
@@ -3731,6 +3814,10 @@ async def config_reminder(interaction: discord.Interaction, minutes: app_command
 
 @config.command(name="officer", description="Role allowed to manage raids (leave empty to clear)")
 async def config_officer(interaction: discord.Interaction, role: Optional[discord.Role] = None):
+    if role is not None and role.is_default():
+        return await interaction.response.send_message(
+            "@everyone can't be the officer role: every member could then manage every raid. Pick a real role.",
+            ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
     db.set_setting(interaction.guild_id, "officer_role", role.id if role else None)
     await interaction.response.send_message(
         f"Members with {role.mention} can now use `/raid` commands." if role else
@@ -3857,6 +3944,13 @@ async def setup_hook():
 
 
 @bot.event
+async def on_guild_join(guild):
+    if GUILD_ID and guild.id != GUILD_ID:
+        log.warning("The bot was added to another server, '%s' (%s). If you didn't do this, remove it from that "
+                    "server and turn off 'Public Bot' in the Developer Portal.", guild.name, guild.id)
+
+
+@bot.event
 async def on_ready():
     log.info("Logged in as %s (WoW preset: %s)", bot.user, os.getenv("WOW_VERSION") or "retail")
 
@@ -3913,6 +4007,9 @@ def preflight() -> None:
                          "Fix: Developer Portal -> your application -> Bot -> Privileged Gateway Intents -> "
                          "turn on SERVER MEMBERS INTENT -> Save Changes, then start again.")
 
+    if checks.bot_is_public(TOKEN):
+        print("  Warning:  'Public Bot' is on, so anyone with the bot's ID can add it to their own server.\n"
+              "            Turn it off: Developer Portal -> your application -> Bot -> Public Bot -> off -> Save Changes.")
     try:
         guilds = checks.bot_guilds(TOKEN)
     except checks.DiscordError:

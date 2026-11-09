@@ -3,6 +3,7 @@ import json
 import shutil
 import time
 import sqlite3
+from urllib.parse import quote
 from datetime import date, datetime
 from pathlib import Path
 
@@ -171,7 +172,7 @@ class DatabaseCorrupt(Exception):
 def file_is_healthy(path) -> bool:
     """True if `path` opens as a SQLite database and passes SQLite's own consistency check."""
     try:
-        con = sqlite3.connect(f"file:{Path(path).as_posix()}?mode=ro", uri=True)
+        con = sqlite3.connect(f"file:{quote(Path(path).as_posix())}?mode=ro", uri=True)
         try:
             return con.execute("PRAGMA quick_check").fetchone()[0] == "ok"
         finally:
@@ -189,6 +190,7 @@ class DB:
             self.conn.row_factory = sqlite3.Row
             self.conn.execute("PRAGMA busy_timeout = 5000")
             self.conn.execute("PRAGMA foreign_keys = ON")
+            self.conn.execute("PRAGMA secure_delete = ON")  # /forgetme: deleted rows are overwritten, not just unlinked
             if self.conn.execute("PRAGMA quick_check").fetchone()[0] != "ok":
                 raise DatabaseCorrupt("SQLite's consistency check failed")
             self.conn.executescript(SCHEMA)
@@ -408,9 +410,10 @@ class DB:
                          (now - KEEP_CANCELLED_DAYS * 86400,)).rowcount
 
     def pending_reminders(self, now):
-        """Upcoming events not reminded yet. The caller applies each server's own lead time."""
+        """Upcoming events not reminded yet, closed or not (a raid closed for sign-ups still happens, so the people
+        already in still get their reminder). The caller applies each server's own lead time."""
         return self._all(
-            "SELECT * FROM events WHERE reminded=0 AND closed=0 AND message_id!=0 AND start_ts > ?",
+            "SELECT * FROM events WHERE reminded=0 AND message_id!=0 AND start_ts > ?",
             (now,))
 
     def update_event(self, event_id, **fields):
@@ -498,8 +501,15 @@ class DB:
         return self._run("UPDATE signups SET no_show=? WHERE event_id=? AND user_id=?",
                          (int(flag), event_id, user_id)).rowcount > 0
 
-    def stats(self, guild_id, since_ts, until_ts, user_id=None):
-        """Attendance per person over raids that have already started in [since_ts, until_ts)."""
+    def event_channels(self, guild_id, since_ts, until_ts):
+        """Channel ids of this server's raids that started in [since_ts, until_ts)."""
+        return [r["channel_id"] for r in self._all(
+            "SELECT DISTINCT channel_id FROM events WHERE guild_id=? AND start_ts>=? AND start_ts<?",
+            (guild_id, since_ts, until_ts))]
+
+    def stats(self, guild_id, since_ts, until_ts, user_id=None, channel_ids=None):
+        """Attendance per person over raids that have already started in [since_ts, until_ts). channel_ids, when
+        given, limits it to raids in those channels (a channel-scoped raid leader only sees their own raids)."""
         sql = ("SELECT s.user_id, COUNT(*) AS total, "
                "SUM(CASE WHEN s.status IN ('in','late') AND s.no_show=0 THEN 1 ELSE 0 END) AS attended, "
                "SUM(CASE WHEN s.status='late' AND s.no_show=0 THEN 1 ELSE 0 END) AS late, "
@@ -511,6 +521,10 @@ class DB:
         if user_id is not None:
             sql += " AND s.user_id=?"
             args.append(user_id)
+        if channel_ids is not None:
+            ids = [int(c) for c in channel_ids] or [0]
+            sql += " AND e.channel_id IN (" + ",".join("?" * len(ids)) + ")"
+            args.extend(ids)
         sql += " GROUP BY s.user_id ORDER BY attended DESC, no_show ASC, s.user_id"
         return self._all(sql, args)
 
@@ -659,12 +673,15 @@ class DB:
     def snapshot_for_guild(self, dest_path, guild_id) -> None:
         """Write a copy of the database that holds only one server's data (for the daily backup post).
         Other servers' raids, signups, templates, settings and cancelled raids are taken out, and only the
-        characters of players who appear in this server are kept. Any table this code doesn't know about is
+        characters of players who appear in this server are kept (when the bot serves several servers, only the
+        characters used in this one, plus mains). Any table this code doesn't know about is
         dropped rather than risk leaking it. The copy is then VACUUMed so nothing deleted is left in the file."""
         self.snapshot_to(dest_path)
         con = sqlite3.connect(dest_path)
         try:
             tables = [r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")]
+            shared = any(con.execute(f'SELECT 1 FROM "{t}" WHERE guild_id != ? LIMIT 1', (guild_id,)).fetchone()  # nosec B608
+                         for t in tables if "guild_id" in {r[1] for r in con.execute(f'PRAGMA table_info("{t}")')})
             for table in tables:
                 columns = {r[1] for r in con.execute(f'PRAGMA table_info("{table}")')}
                 if "guild_id" in columns:
@@ -680,6 +697,16 @@ class DB:
             con.executemany("INSERT OR IGNORE INTO keep_players VALUES(?)", [(u,) for u in players if u is not None])
             con.execute("DELETE FROM characters WHERE user_id NOT IN (SELECT user_id FROM keep_players)")
             con.execute("DROP TABLE keep_players")
+            if shared:
+                # The bot also serves other servers: keep only characters this server has seen (plus each
+                # player's main), so an alt used only somewhere else doesn't end up in this server's backup.
+                used = {(r[0], (r[1] or "").lower()) for r in con.execute(
+                    "SELECT user_id, char_name FROM signups UNION SELECT user_id, char_name FROM series_signups")}
+                for (raw,) in con.execute("SELECT signups_json FROM cancelled_events").fetchall():
+                    used.update((x.get("user_id"), (x.get("char_name") or "").lower()) for x in json.loads(raw or "[]"))
+                drop = [(cid,) for cid, uid, name, main in con.execute(
+                    "SELECT id, user_id, name, is_main FROM characters") if not main and (uid, name.lower()) not in used]
+                con.executemany("DELETE FROM characters WHERE id=?", drop)
             con.commit()
             con.execute("VACUUM")
         finally:

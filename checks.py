@@ -90,6 +90,15 @@ def members_intent_enabled(token: str) -> bool | None:
     return bool(app.get("flags", 0) & _MEMBERS_INTENT_FLAGS)
 
 
+def bot_is_public(token: str) -> bool | None:
+    """True if anyone can add this bot to their server ('Public Bot' in the Developer Portal), None if unknown."""
+    try:
+        app = api_get("/applications/@me", token)
+    except DiscordError:
+        return None
+    return bool(app.get("bot_public"))
+
+
 def bot_guilds(token: str) -> list[dict]:
     return api_get("/users/@me/guilds", token)
 

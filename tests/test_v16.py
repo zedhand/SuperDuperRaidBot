@@ -208,7 +208,7 @@ cc = B.config_channel.callback
 i = inter(admin, CH[31])
 run(cc(i))
 check("no options: shows current", "Ping role: none" in i.response.sent[0][0][0])
-role = lambda rid: types.SimpleNamespace(id=rid, mention=f"<@&{rid}>")
+role = lambda rid: types.SimpleNamespace(id=rid, mention=f"<@&{rid}>", is_default=lambda: False)
 i = inter(admin, CH[31])
 run(cc(i, ping=role(55), officer=role(66)))
 check("sets both for the current channel", db.setting(G, "ping_role@31") == "55" and db.setting(G, "officer_role@31") == "66")

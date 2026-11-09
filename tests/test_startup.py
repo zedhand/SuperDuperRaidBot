@@ -91,6 +91,7 @@ def run(name, me=None, intent=True, guilds=None, gid=0, expect=None):
     B.GUILD_ID = gid
     C.check_token = lambda t: me or {"id": "42", "username": "RaidBot"}
     C.members_intent_enabled = lambda t: intent
+    C.bot_is_public = lambda t: False
     C.bot_guilds = lambda t: guilds if guilds is not None else [{"id": "1", "name": "My Server"}]
     try:
         B.preflight()

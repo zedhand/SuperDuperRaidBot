@@ -64,7 +64,7 @@ bad = {
     "a filled-in server ID in .env": {"SuperDuperRaidBot/.env": "DISCORD_TOKEN=\nGUILD_ID=123\n"},
     "a bot token in code": {"SuperDuperRaidBot/bot.py": f'TOKEN = "{fake_token}"\n'},
     "a Discord ID": {"SuperDuperRaidBot/README.md": "server 112233445566778899 here\n"},
-    "a personal email": {"SuperDuperRaidBot/README.md": "mail someone.example@gmail.com\n"},
+    "a personal email": {"SuperDuperRaidBot/README.md": "mail someone.example" + "@" + "gmail.com\n"},
     "a webhook URL": {"SuperDuperRaidBot/README.md": "https://discord.com/api/webhooks/1/abc-DEF\n"},
     "a personal Windows path": {"SuperDuperRaidBot/README.md": r"see C:\Users\alex\Desktop" + "\n"},
     "a personal home path": {"SuperDuperRaidBot/README.md": "see /home/alex/bot\n"},

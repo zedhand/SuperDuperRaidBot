@@ -7,7 +7,7 @@ Shipped versions are listed in [CHANGELOG.md](CHANGELOG.md). Ideas below are ope
 
 ## Planned, in build order
 
-Everything below is optional and off by default unless noted. Items 1-13 shipped together in v1.13.0; item 14 comes later.
+Everything below is optional and off by default unless noted. Items 1-13 shipped together in v1.13.0; item 14 (Docker + Raspberry Pi) shipped in v1.13.1.
 
 ### v1.13 "safety net"
 | # | Feature | Why | Effort | Status |

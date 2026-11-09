@@ -27,7 +27,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
-VERSION = "1.13.0"
+VERSION = "1.13.1"
 WINDOWS = os.name == "nt"  # only used to word messages for the person reading them
 IN_DOCKER = bool(os.getenv("RAIDBOT_DOCKER"))  # set by the Dockerfile; settings then come from docker-compose's env_file
 BASE_DIR = Path(__file__).resolve().parent

@@ -1,6 +1,7 @@
 # Changelog
 
-## Unreleased
+## 1.13.1
+A small follow-up to 1.13.0: run the bot 24/7 on a Raspberry Pi, and an invite link that covers the 1.13 extras.
 - **Run it 24/7 on a Raspberry Pi with Docker.** New `Dockerfile`, `docker-compose.yml` and a step-by-step guide, [DOCKER.md](DOCKER.md): from a blank Pi to a bot that starts again by itself after a crash, reboot or power cut, including moving your `.env` and `raidbot.db` over from Windows, backups and restoring. `./docker-update.sh` updates it to the newest release. The token stays in `.env` on the Pi (never in the image), and the database, backups and `raidbot.log` live in the `data` folder. The Windows `.bat` files work exactly as before.
 - New optional setting `LOG_DIR` puts `raidbot.log` in another folder (Docker uses it to keep the log next to the database).
 - The invite link from `SETUP.bat` now also asks for **Manage Events**, **Manage Messages** and **Attach Files**, so `/alerts events`, the pinned `/config board` and `/config backupchannel` work on a new install without changing the bot's role by hand. A bot added earlier keeps its old permissions; give it these yourself if you use those extras.

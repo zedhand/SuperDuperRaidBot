@@ -32,10 +32,14 @@ make a throwaway Discord server and a test bot, then run `python setup.py` and `
 
 ## Releases
 
-Releases are built by GitHub Actions. Bump `VERSION` in `bot.py`, add a `## <version>` section to `CHANGELOG.md`, then push a
-tag `v<version>`. The Release workflow tests, builds `SuperDuperRaidBot-v<version>.zip`, scans it and opens a draft release.
+Releases are built by GitHub Actions. Bump `VERSION` in `bot.py` and the version in `USER_AGENT` in `checks.py`, add a
+`## <version>` section to `CHANGELOG.md`, merge that into `main`, then push a tag `v<version>` on `main`. The Release workflow
+tests, builds `SuperDuperRaidBot-v<version>.zip`, scans it and opens a **draft** release, which the maintainer publishes by hand.
 To check a build locally: `python .github/scripts/build_release.py` (writes to `dist/`, which is git-ignored). A new file that
 should ship must be added to `FILES` in that script, or the scan rejects it.
+
+Dependabot (`.github/dependabot.yml`) opens PRs to keep the Python dependencies and GitHub Actions up to date. They run the
+same tests as any other PR.
 
 ## Pull requests
 

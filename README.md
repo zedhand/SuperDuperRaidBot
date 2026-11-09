@@ -107,7 +107,7 @@ you through five short steps and opens the right Discord pages for you:
 | **2. Allow the bot to see member lists** | On the same **Bot** page, scroll to **Privileged Gateway Intents**, switch **Server Members Intent** on, and click **Save Changes**. The setup notices when you've done it. |
 | **3. Add the bot to your server** | A page opens asking which server to add the bot to. Pick yours and click **Authorize**. The setup notices when the bot has joined, and picks your server automatically. |
 | **4. Timezone** | Setup suggests your PC's timezone. Press Enter to accept, or choose another. Raid times you type are read in this timezone. |
-| **5. WoW version** | Choose Retail, Classic Era, Season of Discovery, Burning Crusade, Wrath, Cataclysm, Mists of Pandaria or WoW: Forever. This decides which classes and specs people can pick. |
+| **5. WoW version** | Choose Retail, Classic Era (also for Hardcore), Season of Discovery, Burning Crusade, Wrath, Cataclysm, Mists of Pandaria or WoW: Forever. This decides which classes and specs people can pick. |
 
 > **Treat the token like a password.** Anyone who has it can control your bot. Never post it in Discord or share your `.env`
 > file. If it ever leaks, go back to the Developer Portal → Bot → **Reset Token**.
@@ -122,6 +122,15 @@ From then on, start the bot by double-clicking **`start.bat`**. To stop it, clos
 The bot needs these permissions in each channel where raids are posted: **View Channel, Send Messages, Embed Links,
 Read Message History** (and **Create Public Threads** if you want discussion threads). If your signup channels are
 private, add the bot's role to them. Run **`/status`** in Discord any time: it lists channels where something is missing.
+
+A few optional extras need one more permission each. The invite link from setup doesn't ask for these, so give them to
+the bot's role yourself (Server Settings → Roles, or the channel's permissions) only if you turn the extra on:
+
+| Extra | Permission it needs |
+|---|---|
+| `/alerts events` (raids in the server's Events list) | **Manage Events** (server-wide, on the bot's role) |
+| `/config board` (the pinned *Upcoming raids* message) | **Manage Messages** in the board's channel, to pin it. Without it the board still works, unpinned |
+| `/config backupchannel` (daily backup post) | **Attach Files** in that channel |
 
 ### Step 4: Give officers a way to post raids
 Anyone with the **Manage Events** permission can already post raids. To let a role do it without that permission, run
@@ -272,7 +281,10 @@ on any single date. `/always list` shows what you're in, and `/always leave` sto
 - **Missing utility warning (optional, `/config buffs`).** Once 8 or more people are in and none of them can provide it, the post says `No Bloodlust yet (Shaman, Mage, Evoker, Hunter)` or `No a battle res yet (...)`. The lists are in `wow_data.py` and are short on purpose; Classic Era, Season of Discovery and WoW: Forever have no Bloodlust.
 - **New-version notice (optional, `/config updatenotice`).** About once a day the bot asks GitHub for the newest release and says so **once per version** in the log channel, with a link. GitHub only sees a request from your computer; nothing about your server is sent. `/status` then also shows the latest version.
 - **Weekly digest (optional, `/config digest`).** Every Monday after 09:00 (server time) a summary of the last 7 days is posted in the log channel: raids, attended, no-shows, who had the most no-shows.
-- **Daily backup** of your data (the last 7 are kept). Each copy is checked right after it is made, and if the database is ever found damaged when the bot starts, it restores the newest healthy backup by itself and keeps the damaged file.
+- **Upcoming raids board (optional, `/config board`).** One pinned message that lists the next raids and keeps itself up to date. See *Extras explained* below.
+- **Low-signup alert (optional, `/alerts lowsignup`).** A set number of hours before a raid, officers get one line in a channel you pick if the raid is still short of people.
+- **Discord Scheduled Events (optional, `/alerts events`).** Each raid that everyone can see also appears in the server's **Events** list, and the event follows the raid when it's edited, cancelled, restored, started and ended.
+- **Daily backup** of your data (the last 7 are kept). With `/config backupchannel` a copy is also posted in a private admin channel every day (see [Data, backups and privacy](#data-backups-and-privacy)). Each copy is checked right after it is made, and if the database is ever found damaged when the bot starts, it restores the newest healthy backup by itself and keeps the damaged file.
 
 ### Commands
 
@@ -362,7 +374,7 @@ on any single date. `/always list` shows what you're in, and `/always leave` sto
 
 ### Who can do what
 - **Officers** are people with the **Manage Events** (or Administrator) permission, or the role you set with `/config officer`.
-- **Admins** are people with **Manage Server**. The `/config` and `/status` commands are hidden from everyone else.
+- **Admins** are people with **Manage Server**. The `/config`, `/alerts` and `/status` commands are hidden from everyone else.
 - A **channel leader** is someone with a role set by `/config channel`. They can create and manage raids **only in that channel
   or category**, which is how several raid teams can share one server.
 
@@ -395,7 +407,8 @@ each as you go, or press **Ctrl + R** (**Cmd + R** on a Mac) to reload Discord, 
 [the 24/7 section](#important-the-bot-must-stay-running).
 
 **Where is my data, and who can see it?** On the computer running the bot, in `raidbot.db`. Nothing is sent anywhere
-except the posts and messages the bot sends in your own Discord server.
+except the posts and messages the bot sends in your own Discord server (and, if an admin turns on `/config backupchannel`,
+a daily copy of the data posted in a private channel there).
 
 **Can I run it from my phone, or from Discord itself?** No. It needs a computer, a Raspberry Pi or a server to run on.
 
@@ -466,6 +479,11 @@ When the bot can't start it explains the problem and the fix in its window. Read
 | The bot window closed or the bot stopped by itself | Open `raidbot.log` (next to `bot.py`) and read the last lines. `start.bat` restarts the bot automatically after a crash. |
 | "That time doesn't exist" / "happens twice" when creating a raid | Clocks change that night in your timezone (daylight saving). Pick a time before or after the change. |
 | Windows says **"Windows protected your PC"** | Click **More info → Run anyway**. The file is new and unsigned. |
+| The **Upcoming raids** board isn't pinned | Give the bot **Manage Messages** in that channel and run `/config board` again, or pin it yourself. |
+| A raid is missing from the board, the low-signup alert or the Events list | On purpose: a raid is only shown where everyone who can read it can also see the raid's channel. Officer-only or team-only raids stay hidden from more public places. |
+| `/alerts events` is on but no events appear | Give the bot's role **Manage Events** (Server Settings → Roles). Events then appear for upcoming raids by themselves. Only raids in a channel everyone can see get one. |
+| `/config backupchannel` refuses my channel | It won't post in a channel everyone can see, because the file has your members' Discord IDs. Turn off **View Channel** for `@everyone` there, and give the bot **View Channel, Send Messages, Attach Files**. |
+| `/raid restore` doesn't list a raid | Only raids cancelled in the last 14 days, in this server, can be brought back. |
 | The update failed | Close the bot, try `Update.bat` again, or [update by hand](#updating). Your settings and data are never touched. |
 
 Still stuck? [Open an issue](../../issues/new/choose) with the bot version and the last lines from the bot's window or `raidbot.log`
@@ -479,7 +497,9 @@ Still stuck? [Open an issue](../../issues/new/choose) with the bot version and t
   git-ignored. If it leaks, reset it right away (Developer Portal → Bot → **Reset Token**).
 - **What the bot can see:** member lists (that's what *Server Members Intent* is for, e.g. for `/raid unsigned`) and the
   commands and button clicks aimed at it. It does **not** read your chat messages.
-- **What it can do:** only what its role allows in each channel. Give it just the channels it needs.
+- **What it can do:** only what its role allows in each channel. Give it just the channels it needs. **Manage Events**,
+  **Manage Messages** and **Attach Files** are only needed for the optional extras listed in
+  [Step 3](#step-3-check-the-bot-has-access-to-your-channels); leave them off if you don't use those.
 - **What it sends to other websites:** nothing by default; it only talks to Discord. Two **optional** features contact another site, and only when an admin turns them on: `/config updatenotice` asks GitHub for the newest release number (no information about you or your server), and `/config raiderio` lets a player run `/character import`, which sends the character name and realm *that player typed* to raider.io to look it up (no accounts, nothing else).
 - **`Update.bat` downloads code from this repository's GitHub releases** and checks the download against the checksum GitHub
   publishes for it, which catches corrupted downloads. It can't protect against the repository itself being compromised, so
@@ -513,7 +533,7 @@ again with `start.bat`. If GitHub doesn't supply a checksum for the download, `U
 
 Everything lives in `raidbot.db` (SQLite) next to the bot: characters, raids and signups. Once a day the bot copies it to
 `backups/` and keeps the newest 7. To restore, stop the bot, copy a backup over `raidbot.db`, start it again. No data leaves
-your machine except what Discord itself receives (the posts and messages the bot sends). The bot does not read your server's
+your machine except what Discord itself receives (the posts and messages the bot sends, and the optional backup post below). The bot does not read your server's
 chat messages.
 
 Any player can type `/forgetme` to delete what the bot stores about them, in every server it's in: their characters, their
@@ -555,6 +575,9 @@ python tests/run_all.py          # every suite, offline, no Discord token needed
 | `setup.py` / `SETUP.bat` / `start.bat` | The one-click setup and launcher |
 | `Update.bat` / `update.ps1` | One-click updater (downloads the latest release, keeps your settings and data) |
 | `tests/` | Offline test suites with a faked Discord (run on every push on Ubuntu and Windows) |
+| `.github/` | Test and release workflows, the release build script, and Dependabot (keeps dependencies and Actions up to date) |
+
+Releases are built by GitHub Actions from a version tag: see *Releases* in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 Contributions are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md). Ideas and what's planned are in [ROADMAP.md](ROADMAP.md),
 and the version history is in [CHANGELOG.md](CHANGELOG.md).

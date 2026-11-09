@@ -80,6 +80,14 @@ def version() -> str:
     return m.group(1)
 
 
+def compose_image_tag() -> str:
+    """The version docker-compose.yml downloads (ghcr.io/.../superduperraidbot:<this>), so a release can't point
+    the Pi at an older image."""
+    m = re.search(r"^\s*image:\s*ghcr\.io/[^\s:]+/superduperraidbot:(\S+)\s*$",
+                  (ROOT / "docker-compose.yml").read_text(encoding="utf-8"), re.M)
+    return m.group(1) if m else ""
+
+
 def changelog_section(ver: str) -> str:
     text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     m = re.search(rf"^## {re.escape(ver)}\s*$(.*?)(?=^## |\Z)", text, re.M | re.S)
@@ -142,6 +150,9 @@ def main(argv=None) -> int:
     ver = version()
     if args.tag and args.tag != f"v{ver}":
         print(f"Tag {args.tag} does not match bot.py VERSION {ver} (expected v{ver}). Nothing was built.")
+        return 1
+    if args.tag and compose_image_tag() != ver:
+        print(f"docker-compose.yml uses image tag {compose_image_tag()!r}, not {ver}. Update its image: line before tagging.")
         return 1
     if args.tag and not changelog_section(ver):
         print(f"CHANGELOG.md has no '## {ver}' section. Add one before tagging.")

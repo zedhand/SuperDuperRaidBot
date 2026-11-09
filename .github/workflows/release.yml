@@ -4,9 +4,12 @@ name: Release
 #   1. runs every test suite and the lint/security checks,
 #   2. checks the tag matches VERSION in bot.py and that CHANGELOG.md has a section for it,
 #   3. builds SuperDuperRaidBot-v<version>.zip exactly like the hand-made releases and scans it for secrets,
-#   4. creates a DRAFT release with the zip attached and the CHANGELOG section as the notes.
+#   4. creates a DRAFT release with the zip attached and the CHANGELOG section as the notes,
+#   5. builds the Docker image for PCs (amd64) and the Raspberry Pi (arm64) and pushes it to
+#      ghcr.io/zedhand/superduperraidbot:<version> (for example :1.13.2, and :1.13 for the newest 1.13.x).
 # Nothing is public until you open the draft on GitHub, check the notes and press "Publish release".
-# Update.bat only sees published releases, so a draft never reaches anyone.
+# Update.bat and docker-update.sh only see published releases, so a draft never reaches anyone, and the image's
+# :latest tag only moves when the release is published (docker-latest.yml).
 
 on:
   push:
@@ -29,6 +32,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write   # needed to create the draft release and upload the zip
+    outputs:
+      version: ${{ steps.build.outputs.version }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -60,3 +65,55 @@ jobs:
             --title "SuperDuperRaidBot $TAG" \
             --notes-file "$RUNNER_TEMP/notes.md"
           echo "Draft release created for $TAG. Review and publish it on the Releases page." >> "$GITHUB_STEP_SUMMARY"
+
+  image:
+    name: Build and push the Docker image (PC and Raspberry Pi)
+    needs: release    # only after the tests passed and the release zip scanned clean
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write   # needed to push to ghcr.io (the repository's own package)
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-qemu-action@v4      # lets the PC runner build the Raspberry Pi (arm64) image too
+      - uses: docker/setup-buildx-action@v4
+      - name: Work out the image tags
+        id: tags
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
+          IMAGE: ghcr.io/${{ github.repository }}
+        run: |
+          image=$(echo "$IMAGE" | tr '[:upper:]' '[:lower:]')   # image names must be lower case
+          minor=${VERSION%.*}
+          {
+            echo "image=$image"
+            echo "tags=$image:$VERSION,$image:$minor"
+          } >> "$GITHUB_OUTPUT"
+      - name: Log in to ghcr.io
+        env:
+          TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+        run: echo "$TOKEN" | docker login ghcr.io -u "$OWNER" --password-stdin
+      - name: Build and push for amd64 and arm64
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          # Fixed labels only: no build machine, user or path details go into the image.
+          labels: |
+            org.opencontainers.image.title=SuperDuperRaidBot
+            org.opencontainers.image.description=Discord raid signup bot for World of Warcraft
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ needs.release.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=MIT
+          provenance: false
+          sbom: false
+      - name: Summary
+        env:
+          TAGS: ${{ steps.tags.outputs.tags }}
+        run: |
+          echo "Docker image pushed: $TAGS" >> "$GITHUB_STEP_SUMMARY"
+          echo ":latest moves to it when you publish the release." >> "$GITHUB_STEP_SUMMARY"

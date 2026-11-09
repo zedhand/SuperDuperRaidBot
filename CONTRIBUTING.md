@@ -32,9 +32,11 @@ make a throwaway Discord server and a test bot, then run `python setup.py` and `
 
 ## Releases
 
-Releases are built by GitHub Actions. Bump `VERSION` in `bot.py` and the version in `USER_AGENT` in `checks.py`, add a
-`## <version>` section to `CHANGELOG.md`, merge that into `main`, then push a tag `v<version>` on `main`. The Release workflow
-tests, builds `SuperDuperRaidBot-v<version>.zip`, scans it and opens a **draft** release, which the maintainer publishes by hand.
+Releases are built by GitHub Actions. Bump `VERSION` in `bot.py`, the version in `USER_AGENT` in `checks.py` and the image tag
+in `docker-compose.yml`, add a `## <version>` section to `CHANGELOG.md`, merge that into `main`, then push a tag `v<version>` on
+`main`. The Release workflow tests, builds `SuperDuperRaidBot-v<version>.zip`, scans it and opens a **draft** release, which the
+maintainer publishes by hand. It then builds the Docker image for amd64 and arm64 and pushes it to
+`ghcr.io/zedhand/superduperraidbot:<version>` (and `:<major.minor>`); publishing the release moves `:latest` to it.
 To check a build locally: `python .github/scripts/build_release.py` (writes to `dist/`, which is git-ignored). A new file that
 should ship must be added to `FILES` in that script, or the scan rejects it.
 

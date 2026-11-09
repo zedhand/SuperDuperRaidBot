@@ -106,6 +106,11 @@ check(".dockerignore lets exactly those files through (so nothing private reache
 check(".dockerignore leaves everything else out", "*" in (root / ".dockerignore").read_text(encoding="utf-8").splitlines())
 compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
 check("docker-compose.yml reads the token from .env and keeps data in ./data", "env_file: .env" in compose and "./data:/data" in compose)
+image = re.search(r"^\s*image:\s*ghcr\.io/zedhand/superduperraidbot:(\S+)\s*$", compose, re.M)
+check(f"docker-compose.yml downloads the image for this version ({B.VERSION})", bool(image) and image.group(1) == B.VERSION,
+      image.group(1) if image else "no ghcr.io image line")
+check("docker-compose.yml doesn't build on the Pi (the build-from-source file does)", "build:" not in compose
+      and "build: ." in (root / "docker-compose.build.yml").read_text(encoding="utf-8"))
 check("data/ holds only its README in git", (root / "data" / "README.txt").exists())
 check("DOCKER.md is linked from the README", "](DOCKER.md)" in readme)
 guide = (root / "DOCKER.md").read_text(encoding="utf-8")

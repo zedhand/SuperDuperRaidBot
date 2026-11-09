@@ -70,7 +70,7 @@ import types  # noqa: E402
 import discord  # noqa: E402
 import bot as B  # noqa: E402
 
-check("this version is 1.13.2", B.VERSION == "1.13.2")
+check("this version is 1.13.3", B.VERSION == "1.13.3")
 import db as dbmod  # noqa: E402
 
 run = asyncio.run

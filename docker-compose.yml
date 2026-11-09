@@ -7,7 +7,7 @@
 #   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build    (or ./docker-update.sh --build)
 services:
   raidbot:
-    image: ghcr.io/zedhand/superduperraidbot:1.13.2
+    image: ghcr.io/zedhand/superduperraidbot:1.13.3
     container_name: raidbot
     restart: unless-stopped       # comes back after a crash, a reboot or a power cut
     init: true                    # a tiny init passes on `docker stop`, so the bot logs out cleanly

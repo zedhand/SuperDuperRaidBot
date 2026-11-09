@@ -1,5 +1,7 @@
 """Tiny SQLite layer. Synchronous is fine for one guild's traffic."""
+import json
 import shutil
+import time
 import sqlite3
 from datetime import date, datetime
 from pathlib import Path
@@ -68,7 +70,20 @@ CREATE TABLE IF NOT EXISTS series_signups (
     role TEXT NOT NULL,
     PRIMARY KEY (series_id, user_id)
 );
+CREATE TABLE IF NOT EXISTS cancelled_events (
+    event_id INTEGER PRIMARY KEY,
+    guild_id INTEGER NOT NULL,
+    channel_id INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    start_ts INTEGER NOT NULL,
+    cancelled_ts INTEGER NOT NULL,
+    cancelled_by INTEGER NOT NULL,
+    event_json TEXT NOT NULL,
+    signups_json TEXT NOT NULL
+);
 """
+
+KEEP_CANCELLED_DAYS = 14  # /raid restore can bring a cancelled raid back for this long
 
 # Columns added after v1.0: (table, column, definition). Each is added only if it is missing, so a real
 # error (a locked or damaged file) is never mistaken for "already there". Older databases keep their data.
@@ -86,7 +101,38 @@ MIGRATIONS = (
     ("events", "voice_checked", "INTEGER NOT NULL DEFAULT 0"),  # v1.11: the voice-channel attendance check has run
     ("events", "class_caps", "TEXT NOT NULL DEFAULT ''"),     # v1.11: per-class limits, e.g. "Mage:4,Warlock:2"
     ("templates", "class_caps", "TEXT NOT NULL DEFAULT ''"),  # v1.11
+    ("characters", "realm", "TEXT NOT NULL DEFAULT ''"),      # v1.13: optional realm, '' = not set
+    ("signups", "note", "TEXT NOT NULL DEFAULT ''"),          # v1.13: the player's short note, '' = none
+    ("events", "low_alerted", "INTEGER NOT NULL DEFAULT 0"),  # v1.13: the low-signup check has run
+    ("events", "sched_event_id", "INTEGER NOT NULL DEFAULT 0"),  # v1.13: its Discord Scheduled Event (0 = none, -1 = done/hands off)
 )
+
+
+REALM_MAX = 40
+
+
+def clean_realm(text: str | None) -> str:
+    """A realm as typed -> what is stored: only letters, digits, spaces, ' and - (every WoW realm name fits, and
+    nothing can turn into Discord formatting or a mention), spaces tidied, at most REALM_MAX characters, '' for none."""
+    kept = "".join(c for c in (text or "") if c.isalnum() or c in " '-")
+    return " ".join(kept.split())[:REALM_MAX].strip()
+
+
+NOTE_MAX = 60
+_NOTE_DROP = set("*_~`|<>@[]\\")  # Discord formatting, mentions, masked links
+
+
+def clean_note(text: str | None) -> str:
+    """A signup note as typed -> what is stored: one line, no Discord formatting, mentions or links (so it can be
+    shown in italics on the raid post without breaking it or pinging anyone), at most NOTE_MAX characters, '' for none."""
+    kept = "".join(c for c in (text or "") if c not in _NOTE_DROP and (c.isprintable() or c.isspace()))
+    kept = kept.replace("://", " ")
+    return " ".join(kept.split())[:NOTE_MAX].strip()
+
+
+def with_realm(name: str, realm: str | None) -> str:
+    """'Thrall' + 'Area 52' -> 'Thrall (Area 52)'; without a realm just the name."""
+    return f"{name} ({realm})" if realm else name
 
 
 def caps_dict(text: str | None) -> dict[str, int]:
@@ -185,17 +231,18 @@ class DB:
     def main_character(self, user_id):
         return self._one("SELECT * FROM characters WHERE user_id=? ORDER BY is_main DESC, id LIMIT 1", (user_id,))
 
-    def upsert_character(self, user_id, name, wow_class, spec, role, make_main):
+    def upsert_character(self, user_id, name, wow_class, spec, role, make_main, realm=None):
+        """Add or update a character. realm=None keeps an existing character's realm; a string sets it."""
         has_any = self._one("SELECT 1 FROM characters WHERE user_id=?", (user_id,)) is not None
         existing = self.character_by_name(user_id, name)
         if existing:
-            self._run("UPDATE characters SET wow_class=?, spec=?, role=? WHERE id=?",
-                      (wow_class, spec, role, existing["id"]))
+            self._run("UPDATE characters SET wow_class=?, spec=?, role=?, realm=? WHERE id=?",
+                      (wow_class, spec, role, existing["realm"] if realm is None else clean_realm(realm), existing["id"]))
             char_id = existing["id"]
         else:
             char_id = self._run(
-                "INSERT INTO characters(user_id,name,wow_class,spec,role,is_main) VALUES(?,?,?,?,?,0)",
-                (user_id, name, wow_class, spec, role)).lastrowid
+                "INSERT INTO characters(user_id,name,wow_class,spec,role,is_main,realm) VALUES(?,?,?,?,?,0,?)",
+                (user_id, name, wow_class, spec, role, clean_realm(realm))).lastrowid
         if make_main or not has_any:
             self.set_main(user_id, char_id)
         return char_id
@@ -203,6 +250,22 @@ class DB:
     def set_main(self, user_id, char_id):
         self._run("UPDATE characters SET is_main=0 WHERE user_id=?", (user_id,))
         self._run("UPDATE characters SET is_main=1 WHERE id=? AND user_id=?", (char_id, user_id))
+
+    def set_realm(self, user_id, char_id, realm):
+        self._run("UPDATE characters SET realm=? WHERE id=? AND user_id=?", (clean_realm(realm), char_id, user_id))
+
+    def realms_for(self, signups) -> dict:
+        """{user_id: realm} for the signups whose character is saved with a realm (for the raid post).
+        The realm comes from the saved character, so changing it there updates every post."""
+        users = {s["user_id"] for s in signups if s["char_name"]}
+        if not users:
+            return {}
+        marks = ",".join("?" * len(users))
+        rows = self._all(f"SELECT user_id, name, realm FROM characters WHERE realm != '' AND user_id IN ({marks})",  # nosec B608
+                         tuple(users))
+        realm = {(r["user_id"], r["name"].lower()): r["realm"] for r in rows}
+        return {s["user_id"]: realm[(s["user_id"], s["char_name"].lower())] for s in signups
+                if s["char_name"] and (s["user_id"], s["char_name"].lower()) in realm}
 
     def delete_character(self, user_id, char_id):
         self._run("DELETE FROM characters WHERE id=? AND user_id=?", (char_id, user_id))
@@ -238,6 +301,112 @@ class DB:
     def delete_event(self, event_id):
         self._run("DELETE FROM events WHERE id=?", (event_id,))
 
+    # ---- cancelled raids (kept KEEP_CANCELLED_DAYS for /raid restore) ----
+    def cancel_event(self, event_id, by_user, now=None):
+        """Delete a raid but keep a copy of it and its signups so /raid restore can bring it back.
+        Returns False if there was no such raid. Event ids are never reused (AUTOINCREMENT), so the copy
+        can go back in under the same id."""
+        now = int(time.time()) if now is None else now
+        event = self.event(event_id)
+        if not event:
+            return False
+        signups = [dict(r) for r in self.signups(event_id)]
+        with self.conn:  # one transaction: the copy is saved and the raid deleted, or neither
+            self.conn.execute(
+                "INSERT OR REPLACE INTO cancelled_events(event_id,guild_id,channel_id,title,start_ts,cancelled_ts,"
+                "cancelled_by,event_json,signups_json) VALUES(?,?,?,?,?,?,?,?,?)",
+                (event_id, event["guild_id"], event["channel_id"], event["title"], event["start_ts"], now, by_user,
+                 json.dumps(dict(event)), json.dumps(signups)))
+            self.conn.execute("DELETE FROM events WHERE id=?", (event_id,))
+        return True
+
+    def cancelled_events(self, guild_id, now=None):
+        """This server's raids that can still be restored, newest cancellation first."""
+        now = int(time.time()) if now is None else now
+        return self._all("SELECT * FROM cancelled_events WHERE guild_id=? AND cancelled_ts>? ORDER BY cancelled_ts DESC",
+                         (guild_id, now - KEEP_CANCELLED_DAYS * 86400))
+
+    def cancelled_event(self, event_id, now=None):
+        now = int(time.time()) if now is None else now
+        return self._one("SELECT * FROM cancelled_events WHERE event_id=? AND cancelled_ts>?",
+                         (event_id, now - KEEP_CANCELLED_DAYS * 86400))
+
+    def restore_event(self, event_id):
+        """Put a cancelled raid and its signups back. The old post is gone, so message_id and thread_id start at 0
+        and the caller posts a new one. Returns the number of signups restored, or None if there is no copy."""
+        row = self._one("SELECT * FROM cancelled_events WHERE event_id=?", (event_id,))
+        if not row or self.event(event_id):
+            return None
+        event = json.loads(row["event_json"])
+        event.update(message_id=0, thread_id=0, archived=0, sched_event_id=0)  # its Scheduled Event was deleted too
+        signups = json.loads(row["signups_json"])
+        ev_cols = {r[1] for r in self.conn.execute("PRAGMA table_info(events)")}
+        su_cols = {r[1] for r in self.conn.execute("PRAGMA table_info(signups)")}
+        with self.conn:
+            # column names come from the table itself (PRAGMA table_info), values are bound parameters
+            cols = [c for c in event if c in ev_cols]
+            self.conn.execute(f"INSERT INTO events({','.join(cols)}) VALUES({','.join('?' * len(cols))})",  # nosec B608
+                              [event[c] for c in cols])
+            for s in signups:
+                cols = [c for c in s if c in su_cols]
+                self.conn.execute(f"INSERT INTO signups({','.join(cols)}) VALUES({','.join('?' * len(cols))})",  # nosec B608
+                                  [s[c] for c in cols])
+            self.conn.execute("DELETE FROM cancelled_events WHERE event_id=?", (event_id,))
+        return len(signups)
+
+    def undo_restore(self, copy):
+        """Take back a restore whose new post couldn't be sent: delete the raid again and put the original copy
+        (a row from cancelled_events, with the old thread and post ids) back exactly as it was."""
+        with self.conn:
+            self.conn.execute("DELETE FROM events WHERE id=?", (copy["event_id"],))
+            self.conn.execute(f"INSERT OR REPLACE INTO cancelled_events({','.join(copy.keys())}) "  # nosec B608
+                              f"VALUES({','.join('?' * len(copy.keys()))})", tuple(copy))
+
+    # ---- /forgetme ----
+    USER_SETTING_KEYS = ("dm_remind",)  # per-player settings, stored as "<key>@<user id>"
+
+    def user_data_counts(self, user_id):
+        """What /forgetme would delete: {'characters', 'signups', 'series', 'settings', 'cancelled'} -> count."""
+        uid = int(user_id)
+        cancelled = sum(1 for r in self._all("SELECT signups_json FROM cancelled_events")
+                        if any(int(s.get("user_id", 0)) == uid for s in json.loads(r["signups_json"])))
+        return {
+            "characters": self._one("SELECT COUNT(*) c FROM characters WHERE user_id=?", (uid,))["c"],
+            "signups": self._one("SELECT COUNT(*) c FROM signups WHERE user_id=?", (uid,))["c"],
+            "series": self._one("SELECT COUNT(*) c FROM series_signups WHERE user_id=?", (uid,))["c"],
+            "settings": sum(self._one("SELECT COUNT(*) c FROM settings WHERE key=?", (f"{k}@{uid}",))["c"]
+                            for k in self.USER_SETTING_KEYS),
+            "cancelled": cancelled,
+        }
+
+    def forget_user(self, user_id):
+        """Delete everything stored about one player, in every server: characters, signups (so attendance too),
+        /always sign-ups, their own settings, and their signups inside the copies of cancelled raids.
+        Raids they created stay (they belong to the server). One transaction: all of it goes, or none.
+        Returns (counts, ids of raids they were signed up to) so the caller can redraw those posts."""
+        uid = int(user_id)
+        counts = self.user_data_counts(uid)
+        event_ids = [r["event_id"] for r in self._all("SELECT event_id FROM signups WHERE user_id=?", (uid,))]
+        with self.conn:
+            self.conn.execute("DELETE FROM characters WHERE user_id=?", (uid,))
+            self.conn.execute("DELETE FROM signups WHERE user_id=?", (uid,))
+            self.conn.execute("DELETE FROM series_signups WHERE user_id=?", (uid,))
+            self.conn.executemany("DELETE FROM settings WHERE key=?",
+                                  [(f"{k}@{uid}",) for k in self.USER_SETTING_KEYS])
+            for r in self.conn.execute("SELECT event_id, signups_json FROM cancelled_events").fetchall():
+                signups = json.loads(r["signups_json"])
+                kept = [s for s in signups if int(s.get("user_id", 0)) != uid]
+                if len(kept) != len(signups):
+                    self.conn.execute("UPDATE cancelled_events SET signups_json=? WHERE event_id=?",
+                                      (json.dumps(kept), r["event_id"]))
+        return counts, event_ids
+
+    def purge_cancelled(self, now=None):
+        """Forget cancelled raids older than KEEP_CANCELLED_DAYS. Returns how many were dropped."""
+        now = int(time.time()) if now is None else now
+        return self._run("DELETE FROM cancelled_events WHERE cancelled_ts<=?",
+                         (now - KEEP_CANCELLED_DAYS * 86400,)).rowcount
+
     def pending_reminders(self, now):
         """Upcoming events not reminded yet. The caller applies each server's own lead time."""
         return self._all(
@@ -246,7 +415,8 @@ class DB:
 
     def update_event(self, event_id, **fields):
         allowed = {"title", "description", "start_ts", "cap_tank", "cap_healer", "cap_dps", "reminded",
-                   "lock_shown", "repeat_days", "repeated", "thread_id", "archived", "nudged", "autoclosed", "series_id", "voice_checked", "class_caps"}
+                   "lock_shown", "repeat_days", "repeated", "thread_id", "archived", "nudged", "autoclosed", "series_id", "voice_checked", "class_caps", "low_alerted",
+                   "sched_event_id"}
         fields = {k: v for k, v in fields.items() if k in allowed}
         if fields:
             # column names are filtered through the allow-list above, values are bound parameters
@@ -256,6 +426,20 @@ class DB:
     def pending_nudges(self, now):
         """Upcoming events whose 'who hasn't answered' ping hasn't gone out. Caller applies the setting."""
         return self._all("SELECT * FROM events WHERE nudged=0 AND closed=0 AND message_id!=0 AND start_ts>?", (now,))
+
+    def pending_lowsignup(self, now):
+        """Upcoming events whose low-signup check hasn't run. Caller applies the setting."""
+        return self._all("SELECT * FROM events WHERE low_alerted=0 AND message_id!=0 AND start_ts>?", (now,))
+
+    def sched_candidates(self, now, since):
+        """Raids whose Discord Scheduled Event may need creating, updating, starting or ending: posted upcoming raids
+        without one yet, and raids that started after `since` and still have one. Caller applies the setting."""
+        return self._all("SELECT * FROM events WHERE (sched_event_id=0 AND message_id!=0 AND start_ts>?) "
+                         "OR (sched_event_id>0 AND start_ts>?)", (now, since))
+
+    def sched_events_of(self, guild_id):
+        """This server's raids that still have a Discord Scheduled Event."""
+        return self._all("SELECT * FROM events WHERE guild_id=? AND sched_event_id>0", (guild_id,))
 
     def pending_autoclose(self, now):
         """Upcoming, still-open events whose automatic sign-up closing hasn't run. Caller applies the setting."""
@@ -304,6 +488,12 @@ class DB:
             "updated_ts=strftime('%s','now')",
             (event_id, user_id, char_name, wow_class, spec, role, status, bench_from))
 
+    def set_note(self, event_id, user_id, note) -> bool:
+        """Set or clear ('' / None) a player's note on their signup. The note stays when they change status or
+        character (set_signup leaves it alone) and goes with the signup. False if they aren't signed up."""
+        return self._run("UPDATE signups SET note=? WHERE event_id=? AND user_id=?",
+                         (clean_note(note), event_id, user_id)).rowcount > 0
+
     def set_no_show(self, event_id, user_id, flag):
         return self._run("UPDATE signups SET no_show=? WHERE event_id=? AND user_id=?",
                          (int(flag), event_id, user_id)).rowcount > 0
@@ -326,7 +516,7 @@ class DB:
 
     def user_upcoming(self, guild_id, user_id, now):
         return self._all(
-            "SELECT e.*, s.status AS my_status FROM signups s JOIN events e ON e.id=s.event_id "
+            "SELECT e.*, s.status AS my_status, s.note AS my_note FROM signups s JOIN events e ON e.id=s.event_id "
             "WHERE e.guild_id=? AND s.user_id=? AND e.start_ts>=? AND e.message_id!=0 ORDER BY e.start_ts",
             (guild_id, user_id, now))
 
@@ -461,6 +651,39 @@ class DB:
         for old in sorted(folder.glob("raidbot-*.db"))[:-keep]:
             old.unlink(missing_ok=True)
         return target
+
+    def guilds_with_key(self, key):
+        """Every server that has this setting at all, whatever its value."""
+        return [r["guild_id"] for r in self._all("SELECT guild_id FROM settings WHERE key=?", (key,))]
+
+    def snapshot_for_guild(self, dest_path, guild_id) -> None:
+        """Write a copy of the database that holds only one server's data (for the daily backup post).
+        Other servers' raids, signups, templates, settings and cancelled raids are taken out, and only the
+        characters of players who appear in this server are kept. Any table this code doesn't know about is
+        dropped rather than risk leaking it. The copy is then VACUUMed so nothing deleted is left in the file."""
+        self.snapshot_to(dest_path)
+        con = sqlite3.connect(dest_path)
+        try:
+            tables = [r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")]
+            for table in tables:
+                columns = {r[1] for r in con.execute(f'PRAGMA table_info("{table}")')}
+                if "guild_id" in columns:
+                    con.execute(f'DELETE FROM "{table}" WHERE guild_id != ?', (guild_id,))  # nosec B608 (names come from sqlite_master)
+                elif table == "signups":
+                    con.execute("DELETE FROM signups WHERE event_id NOT IN (SELECT id FROM events)")
+                elif table != "characters":
+                    con.execute(f'DROP TABLE "{table}"')  # nosec B608 (an unknown table is dropped, not shared)
+            players = {r[0] for r in con.execute("SELECT user_id FROM signups UNION SELECT user_id FROM series_signups")}
+            for (raw,) in con.execute("SELECT signups_json FROM cancelled_events").fetchall():
+                players.update(s.get("user_id") for s in json.loads(raw or "[]"))
+            con.execute("CREATE TEMP TABLE keep_players(user_id INTEGER PRIMARY KEY)")
+            con.executemany("INSERT OR IGNORE INTO keep_players VALUES(?)", [(u,) for u in players if u is not None])
+            con.execute("DELETE FROM characters WHERE user_id NOT IN (SELECT user_id FROM keep_players)")
+            con.execute("DROP TABLE keep_players")
+            con.commit()
+            con.execute("VACUUM")
+        finally:
+            con.close()
 
     def snapshot_to(self, dest_path) -> None:
         """Write a consistent copy of the live database to dest_path (for /config backup)."""

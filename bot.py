@@ -27,7 +27,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
-VERSION = "1.12.0"
+VERSION = "1.13.0"
 WINDOWS = os.name == "nt"  # only used to word messages for the person reading them
 BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / ".env"  # always the .env next to bot.py, whatever folder you launch from
@@ -35,7 +35,7 @@ load_dotenv(ENV_PATH)
 
 import checks  # noqa: E402
 import wow_data as wd  # noqa: E402  # noqa: E402  (after load_dotenv so WOW_VERSION is read)
-from db import caps_dict, caps_text, open_database  # noqa: E402
+from db import KEEP_CANCELLED_DAYS, NOTE_MAX, caps_dict, caps_text, clean_note, clean_realm, open_database  # noqa: E402
 from embeds import build_embed, text_problem  # noqa: E402
 
 def _env_int(name: str, default: int) -> int:
@@ -176,9 +176,25 @@ def may_sign_up(interaction: discord.Interaction) -> bool:
     return any(r.id == role_id for r in getattr(interaction.user, "roles", []))
 
 
+def notes_mode(guild_id: int) -> str:
+    """/config notes: 'off' (the default), 'officers' (notes only in /raid roster) or 'post' (also on the raid post)."""
+    if db.setting(guild_id, "signup_notes") != "1":
+        return "off"
+    return "post" if db.setting(guild_id, "notes_on_post") == "1" else "officers"
+
+
+def spec_switch_on(guild_id: int) -> bool:
+    """/config specswitch: show a Spec button on raid posts (off by default)."""
+    return db.setting(guild_id, "spec_switch") == "1"
+
+
 def render_embed(event, signups, locked: bool):
-    """The raid post, with the optional missing-utility warnings if /config buffs is on."""
-    return build_embed(event, signups, locked, buffs=db.setting(event["guild_id"], "buffs") == "1")
+    """The raid post, with the optional missing-utility warnings if /config buffs is on, realms after the
+    character names if /config realms is on, and players' notes if /config notes shows them on the post."""
+    g = event["guild_id"]
+    realms = db.realms_for(signups) if db.setting(g, "show_realms") == "1" else None
+    notes = ({s["user_id"]: s["note"] for s in signups if s["note"]} if notes_mode(g) == "post" else None)
+    return build_embed(event, signups, locked, buffs=db.setting(g, "buffs") == "1", realms=realms, notes=notes)
 
 
 def autoclose_inside(guild_id: int, start_ts: int) -> bool:
@@ -265,16 +281,20 @@ async def promote_bench(event_id: int) -> None:
             continue
         db.set_signup(event_id, s["user_id"], s["char_name"], s["wow_class"], s["spec"], s["role"], s["bench_from"])
         text = f"🎉 A {wd.ROLE_SINGULAR[s['role']].lower()} slot opened up. You're off the bench for **{event['title']}**!"
-        try:
-            await (await bot.fetch_user(s["user_id"])).send(text)
-        except discord.HTTPException:  # DMs closed: mention them in the raid channel instead
-            channel = bot.get_channel(event["channel_id"])
-            if channel:
-                try:
-                    await channel.send(f"<@{s['user_id']}> {text}",
-                                       allowed_mentions=USERS_ONLY)
-                except discord.HTTPException:
-                    pass
+        await tell_player(event, s["user_id"], text)
+
+
+async def tell_player(event, user_id: int, text: str) -> None:
+    """A private message to a player; if their DMs are closed, a mention in the raid channel instead. Never raises."""
+    try:
+        await (await bot.fetch_user(user_id)).send(text)
+    except discord.HTTPException:  # DMs closed: mention them in the raid channel instead
+        channel = bot.get_channel(event["channel_id"])
+        if channel:
+            try:
+                await channel.send(f"<@{user_id}> {text}", allowed_mentions=USERS_ONLY)
+            except discord.HTTPException:
+                pass
 
 
 STARTED_AT = time.time()
@@ -290,6 +310,13 @@ async def audit(guild_id: int, text: str) -> None:
         await channel.send(text[:2000], allowed_mentions=discord.AllowedMentions.none())
     except discord.HTTPException:
         pass
+
+
+async def redraw_open_posts(guild_id: int) -> None:
+    """Redraw a server's upcoming raid posts, after a setting that changes how they look."""
+    for upcoming in db.upcoming_events(guild_id, int(time.time()))[:25]:
+        if upcoming["message_id"]:
+            await refresh_message(upcoming["id"])
 
 
 async def update_event(event_id: int) -> None:
@@ -337,13 +364,14 @@ async def _redraw(event_id: int) -> bool:
     embed = render_embed(event, db.signups(event_id), locked)
     try:
         await channel.get_partial_message(event["message_id"]).edit(
-            embed=embed, view=ClosedView() if locked else RaidView())
+            embed=embed, view=ClosedView() if locked else RaidView(spec_switch_on(event["guild_id"])))
     except discord.NotFound:
         return True  # the post was deleted by hand
     except discord.HTTPException as e:
         log.warning("Could not edit event %s message: %s", event_id, e)
         note_error(f"could not edit the post for raid #{event_id}: {e}")
         return False
+    schedule_board(event["guild_id"])  # signups, title or time changed: the board's counts follow
     return True
 
 
@@ -358,7 +386,7 @@ class CharacterSelect(discord.ui.Select):
         # No option is preselected: choosing an already-selected option sends nothing to the bot, which
         # would leave a player with one saved character unable to sign up. The main is starred instead.
         opts = [discord.SelectOption(label=(("⭐ " if c["is_main"] else "") + c["name"])[:100],
-                                     description=f"{c['spec']} {c['wow_class']}"[:100],
+                                     description=f"{c['spec']} {c['wow_class']}{' · ' + realm_of(c) if realm_of(c) else ''}"[:100],
                                      value=str(c["id"]))
                 for c in chars[:25]]
         super().__init__(placeholder="Pick a character…", options=opts)
@@ -452,6 +480,55 @@ class CharacterPickView(discord.ui.View):
         self.add_item(ClassSelect(event_id))
 
 
+class SpecSwitchSelect(discord.ui.Select):
+    """The Spec button's picker: the other specs of the class someone signed up with."""
+
+    def __init__(self, event_id: int, cls: str, specs: list[str]):
+        self.event_id, self.cls = event_id, cls
+        super().__init__(placeholder="Pick your new spec…", options=[
+            discord.SelectOption(label=s, description=wd.GROUP_LABEL[wd.DATA[cls][s]], emoji=wd.GROUP_ICON[wd.DATA[cls][s]])
+            for s in specs[:25]])
+
+    async def callback(self, interaction: discord.Interaction):
+        await change_spec(interaction, self.event_id, self.cls, self.values[0])
+
+
+async def change_spec(interaction: discord.Interaction, event_id: int, cls: str, spec: str):
+    """Change the spec (and so maybe the role) of someone's signup, keeping their character, status and note.
+    Someone who is in or late, or waiting on the bench for a full slot, is checked against the new role's limit
+    again: they may move in, or onto the bench. A bench or tentative choice of their own stays as it was."""
+    event = db.event(event_id)
+    if not event or is_locked(event):
+        return await interaction.response.edit_message(content="Signups are closed.", view=None)
+    uid = interaction.user.id
+    current = db.signup(event_id, uid)
+    if not current or current["wow_class"] != cls or current["status"] == "absent":
+        return await interaction.response.edit_message(
+            content="Your signup changed in the meantime. Press **Spec** again.", view=None)
+    role = wd.role_for(cls, spec)
+    wanted = current["bench_from"] or current["status"]  # an auto-benched player still wants their slot
+    if wanted in ("in", "late"):
+        status, bench_from = apply_cap(event, uid, role, wanted, cls)
+    else:
+        status, bench_from = current["status"], None
+    db.set_signup(event_id, uid, current["char_name"], cls, spec, role, status, bench_from)
+    if status == "bench" and bench_from:
+        extra = f" {bench_reason(event, uid, role, cls)}, so you're on the bench.{queue_note(event_id, uid)}"
+    elif current["status"] == "bench" and current["bench_from"]:
+        extra = f" There was room, so you're **{status}** now."
+    else:
+        extra = ""
+    await interaction.response.edit_message(
+        content=f"Switched to **{spec}** {cls} ({wd.ROLE_LABEL[role]}).{extra}", view=None)
+    await update_event(event_id)
+
+
+class SpecSwitchView(discord.ui.View):
+    def __init__(self, event_id: int, cls: str, specs: list[str]):
+        super().__init__(timeout=120)
+        self.add_item(SpecSwitchSelect(event_id, cls, specs))
+
+
 class ClosedView(discord.ui.View):
     """Replaces the buttons with a greyed-out bar once an event is closed."""
 
@@ -462,10 +539,15 @@ class ClosedView(discord.ui.View):
 
 
 class RaidView(discord.ui.View):
-    """Persistent buttons under every raid post. Event is found via the message id."""
+    """Persistent buttons under every raid post. Event is found via the message id.
 
-    def __init__(self):
+    spec_button: also show the Spec button (/config specswitch). The view registered at startup has it, so clicks on
+    any post are answered; the posts themselves only get it when the server turned the switch on."""
+
+    def __init__(self, spec_button: bool = False):
         super().__init__(timeout=None)
+        if not spec_button:
+            self.remove_item(self.switch_spec)
 
     async def _event(self, interaction: discord.Interaction):
         event = db.event_by_message(interaction.message.id)
@@ -541,6 +623,28 @@ class RaidView(discord.ui.View):
     @discord.ui.button(label="Absent", style=discord.ButtonStyle.danger, custom_id="raid:absent")
     async def absent(self, interaction: discord.Interaction, _: discord.ui.Button):
         await self._status(interaction, "absent")
+
+    @discord.ui.button(label="Spec", emoji="🔄", style=discord.ButtonStyle.secondary, custom_id="raid:spec")
+    async def switch_spec(self, interaction: discord.Interaction, _: discord.ui.Button):
+        event = await self._event(interaction)
+        if not event:
+            return
+        if not spec_switch_on(interaction.guild_id):
+            return await interaction.response.send_message(
+                "Switching spec from the post is turned off. Press **Sign Up** to sign up again with another spec.",
+                ephemeral=True)
+        current = db.signup(event["id"], interaction.user.id)
+        if not current or not current["wow_class"] or current["status"] == "absent":
+            return await interaction.response.send_message(
+                "You aren't signed up with a character for this raid. Press **Sign Up** first.", ephemeral=True)
+        cls = current["wow_class"]
+        others = [s for s in wd.DATA.get(cls, {}) if s != current["spec"]]
+        if not others:
+            return await interaction.response.send_message(
+                f"There's no other {cls} spec to switch to. Press **Sign Up** to pick another character.", ephemeral=True)
+        await interaction.response.send_message(
+            f"You're signed up as **{current['char_name']}**, {current['spec']} {cls}. Switch to:",
+            view=SpecSwitchView(event["id"], cls, others), ephemeral=True)
 
     @discord.ui.button(label="Calendar", emoji="📅", style=discord.ButtonStyle.secondary, custom_id="raid:ics")
     async def calendar(self, interaction: discord.Interaction, _: discord.ui.Button):
@@ -631,6 +735,7 @@ async def raiderio_lookup(region: str, realm: str, name: str) -> dict:
     link = data.get("profile_url")
     return {"name": str(data.get("name") or name).strip()[:32], "class": cls,
             "spec": wd.find_spec(cls, data.get("active_spec_name")),
+            "realm": clean_realm(data.get("realm") if isinstance(data.get("realm"), str) else ""),
             "ilvl": int(ilvl) if isinstance(ilvl, (int, float)) else None,
             "url": link if isinstance(link, str) and link.startswith("https://raider.io/") else None}
 
@@ -665,16 +770,27 @@ async def spec_autocomplete(interaction: discord.Interaction, current: str):
             if current.lower() in s.lower()][:25]
 
 
+def realm_of(c) -> str:
+    """A saved character's realm ('' if none). Works for database rows and plain dicts."""
+    return (c["realm"] if "realm" in c.keys() else "") or ""
+
+
+def char_label(c) -> str:
+    """'Thrall-Area 52 (Restoration Shaman)' for menus; no realm part when none is saved."""
+    return f"{c['name']}{'-' + realm_of(c) if realm_of(c) else ''} ({c['spec']} {c['wow_class']})"[:100]
+
+
 async def own_char_autocomplete(interaction: discord.Interaction, current: str):
-    return [app_commands.Choice(name=f"{c['name']} ({c['spec']} {c['wow_class']})", value=c["name"])
+    return [app_commands.Choice(name=char_label(c), value=c["name"])
             for c in db.characters(interaction.user.id) if current.lower() in c["name"].lower()][:25]
 
 
 @character.command(name="add", description="Add a character (or change the spec of an existing one)")
-@app_commands.describe(name="Character name", wowclass="Class", spec="Spec", main="Make this your main")
+@app_commands.describe(name="Character name", wowclass="Class", spec="Spec", main="Make this your main",
+                       realm="Realm (optional, e.g. Area 52). Leave it out to keep the one already saved")
 @app_commands.autocomplete(wowclass=class_autocomplete, spec=spec_autocomplete)
 async def character_add(interaction: discord.Interaction, name: str, wowclass: str, spec: str,
-                        main: bool = False):
+                        main: bool = False, realm: Optional[str] = None):
     cls = wd.find_class(wowclass)
     if not cls:
         return await interaction.response.send_message(
@@ -688,8 +804,13 @@ async def character_add(interaction: discord.Interaction, name: str, wowclass: s
         return await interaction.response.send_message(
             f"You already have {MAX_CHARACTERS} characters, which is the most the sign-up menu can show. "
             "Remove one with `/character remove` first.", ephemeral=True)
-    db.upsert_character(interaction.user.id, name, cls, sp, wd.role_for(cls, sp), main)
-    await interaction.response.send_message(f"Saved **{name}** — {sp} {cls}.", ephemeral=True)
+    if realm is not None and realm.strip() and not clean_realm(realm):
+        return await interaction.response.send_message(
+            "That doesn't look like a realm name. Use letters, numbers, spaces, ' and -, e.g. `Area 52`.", ephemeral=True)
+    db.upsert_character(interaction.user.id, name, cls, sp, wd.role_for(cls, sp), main, realm)
+    saved = db.character_by_name(interaction.user.id, name)
+    where = f" on {saved['realm']}" if saved["realm"] else ""
+    await interaction.response.send_message(f"Saved **{saved['name']}**{where} — {sp} {cls}.", ephemeral=True)
 
 
 @character.command(name="list", description="Show your characters")
@@ -698,9 +819,27 @@ async def character_list(interaction: discord.Interaction):
     if not chars:
         return await interaction.response.send_message("No characters yet. Use `/character add`.",
                                                        ephemeral=True)
-    lines = [f"{'⭐ ' if c['is_main'] else ''}**{c['name']}** — {c['spec']} {c['wow_class']} ({c['role']})"
-             for c in chars]
+    lines = [f"{'⭐ ' if c['is_main'] else ''}**{c['name']}**{' · ' + c['realm'] if c['realm'] else ''} — "
+             f"{c['spec']} {c['wow_class']} ({c['role']})" for c in chars]
+    if not any(c["realm"] for c in chars):
+        lines.append("-# Add a realm with `/character realm` if you like (optional).")
     await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+
+@character.command(name="realm", description="Set or clear the realm of one of your characters")
+@app_commands.describe(name="Your character", realm="Realm, e.g. Area 52. Leave it out to clear it")
+@app_commands.autocomplete(name=own_char_autocomplete)
+async def character_realm(interaction: discord.Interaction, name: str, realm: Optional[str] = None):
+    c = db.character_by_name(interaction.user.id, name)
+    if not c:
+        return await interaction.response.send_message("Character not found.", ephemeral=True)
+    if realm and realm.strip() and not clean_realm(realm):
+        return await interaction.response.send_message(
+            "That doesn't look like a realm name. Use letters, numbers, spaces, ' and -, e.g. `Area 52`.", ephemeral=True)
+    db.set_realm(interaction.user.id, c["id"], realm)
+    new = clean_realm(realm)
+    await interaction.response.send_message(
+        f"**{c['name']}** is now on **{new}**." if new else f"Cleared the realm of **{c['name']}**.", ephemeral=True)
 
 
 @character.command(name="main", description="Set your main character")
@@ -766,11 +905,11 @@ async def character_import(interaction: discord.Interaction, name: str, realm: O
             f"You already have {MAX_CHARACTERS} characters, which is the most the sign-up menu can show. "
             "Remove one with `/character remove` first.", ephemeral=True)
     db.upsert_character(interaction.user.id, found["name"], found["class"], found["spec"],
-                        wd.role_for(found["class"], found["spec"]), main)
+                        wd.role_for(found["class"], found["spec"]), main, found.get("realm") or realm)
     extra = f", item level {found['ilvl']}" if found["ilvl"] else ""
     link = f" <{found['url']}>" if found["url"] else ""
     await interaction.followup.send(
-        f"Saved **{found['name']}** — {found['spec']} {found['class']}{extra}.{link}\n"
+        f"Saved **{found['name']}** on {found.get('realm') or clean_realm(realm)} — {found['spec']} {found['class']}{extra}.{link}\n"
         "(To look it up I sent the name and realm you typed to raider.io. Nothing else is shared.)", ephemeral=True)
 
 
@@ -1004,13 +1143,17 @@ async def post_event(channel, guild, creator_id: int, title: str, description: s
         mentions = discord.AllowedMentions.none()
     try:
         msg = await channel.send(content=ping.mention if ping else None, embed=render_embed(event, [], False),
-                                 view=RaidView(), allowed_mentions=mentions)
+                                 view=RaidView(spec_switch_on(guild.id)), allowed_mentions=mentions)
     except discord.HTTPException:
         db.delete_event(event_id)
         raise
     db.set_message_id(event_id, msg.id)
+    schedule_board(guild.id)
+    sched_soon(event_id)
     if autoclose_inside(guild.id, ts):
         db.update_event(event_id, autoclosed=1)  # posted inside the window: don't close it a minute later
+    if lowsignup_inside(guild.id, ts):
+        db.update_event(event_id, low_alerted=1)  # posted inside the window: the officer posting it knows it's empty
     notes = []
     if ping and not ping.is_default() and not (
             ping.mentionable or channel.permissions_for(guild.me).mention_everyone):
@@ -1027,7 +1170,10 @@ async def post_event(channel, guild, creator_id: int, title: str, description: s
 
 
 async def delete_event_post(event) -> None:
-    """Delete the raid's post and its thread, ignoring anything already gone."""
+    """Delete the raid's post, its thread and its Discord Scheduled Event, ignoring anything already gone."""
+    schedule_board(event["guild_id"])
+    if event["sched_event_id"] > 0:
+        await remove_sched_event(bot.get_guild(event["guild_id"]), event["sched_event_id"])
     channel = bot.get_channel(event["channel_id"])
     if channel and event["message_id"]:
         try:
@@ -1316,7 +1462,8 @@ async def raid_edit(interaction: discord.Interaction, event_id: int, title: Opti
             return await interaction.response.send_message("That time is in the past.", ephemeral=True)
         if ts != event["start_ts"]:
             fields.update(start_ts=ts, reminded=0, lock_shown=0, nudged=0,  # re-arm the reminder, nudge and lock
-                          autoclosed=1 if autoclose_inside(event["guild_id"], ts) else 0)
+                          autoclosed=1 if autoclose_inside(event["guild_id"], ts) else 0,
+                          low_alerted=1 if lowsignup_inside(event["guild_id"], ts) else 0)
             if event["autoclosed"] and event["closed"]:
                 db.set_closed(event_id, False)  # it was closed automatically for the old time: reopen
             time_changed = True
@@ -1325,9 +1472,10 @@ async def raid_edit(interaction: discord.Interaction, event_id: int, title: Opti
                                                        ephemeral=True)
     db.update_event(event_id, **fields)
     await audit(interaction.guild_id, f"✏️ {interaction.user.mention} edited **{event['title']}** (#{event_id}): "
-                                      + ", ".join(sorted(k for k in fields if k not in ("reminded", "lock_shown", "nudged", "autoclosed"))))
+                                      + ", ".join(sorted(k for k in fields if k not in ("reminded", "lock_shown", "nudged", "autoclosed", "low_alerted"))))
     await interaction.response.send_message(f"Updated event #{event_id}.", ephemeral=True)
     await update_event(event_id)  # a raised limit may free bench slots
+    sched_soon(event_id)  # the Scheduled Event (/alerts events) follows a new title, time or description
     if time_changed and notify:
         users = [x["user_id"] for x in db.signups(event_id) if x["status"] in ("in", "late", "tentative", "bench")]
         channel = bot.get_channel(event["channel_id"])
@@ -1340,6 +1488,24 @@ async def raid_edit(interaction: discord.Interaction, event_id: int, title: Opti
                 pass
 
 
+def raid_line(e, show_id: bool = True) -> str:
+    """Two lines about one raid: linked title, time, channel, then who's coming per role (for /raid list and the board)."""
+    signups = db.signups(e["id"])
+    attending = [x for x in signups if x["status"] in ("in", "late")]
+    by_role = {r: sum(1 for x in attending if x["role"] == r) for r in wd.ROLES}
+
+    def part(letter: str, role: str) -> str:
+        cap = e[f"cap_{role}"]
+        return f"{letter} {by_role[role]}/{cap}" if cap else f"{letter} {by_role[role]}"
+
+    others = {st: sum(1 for x in signups if x["status"] == st) for st in ("tentative", "bench")}
+    extra = "".join(f" · {n} {st}" for st, n in others.items() if n) + (" · 🔒 closed" if e["closed"] else "")
+    link = f"https://discord.com/channels/{e['guild_id']}/{e['channel_id']}/{e['message_id']}"
+    name = f"#{e['id']} {e['title']}" if show_id else e["title"]
+    return (f"[**{name}**]({link}) · <t:{e['start_ts']}:f> (<t:{e['start_ts']}:R>) · <#{e['channel_id']}>\n"
+            f"👥 {len(attending)} in · {part('🛡️', 'tank')} · {part('💚', 'healer')} · {part('⚔️', 'dps')}{extra}")
+
+
 @raid.command(name="list", description="Upcoming raids you can manage, with sign-up counts and links")
 async def raid_list(interaction: discord.Interaction):
     now = int(time.time())
@@ -1347,21 +1513,7 @@ async def raid_list(interaction: discord.Interaction):
             if e["message_id"] and can_manage_channel(interaction, e["channel_id"])]
     if not rows:
         return await interaction.response.send_message("No upcoming raids that you can manage.", ephemeral=True)
-    lines = []
-    for e in rows[:15]:
-        attending = [x for x in db.signups(e["id"]) if x["status"] in ("in", "late")]
-        by_role = {r: sum(1 for x in attending if x["role"] == r) for r in wd.ROLES}
-
-        def part(letter: str, role: str) -> str:
-            cap = e[f"cap_{role}"]
-            return f"{letter} {by_role[role]}/{cap}" if cap else f"{letter} {by_role[role]}"
-
-        others = {st: sum(1 for x in db.signups(e["id"]) if x["status"] == st) for st in ("tentative", "bench")}
-        extra = "".join(f" · {n} {st}" for st, n in others.items() if n) + (" · 🔒 closed" if e["closed"] else "")
-        link = f"https://discord.com/channels/{e['guild_id']}/{e['channel_id']}/{e['message_id']}"
-        lines.append(f"[**#{e['id']} {e['title']}**]({link}) · <t:{e['start_ts']}:f> (<t:{e['start_ts']}:R>) · <#{e['channel_id']}>\n"
-                     f"👥 {len(attending)} in · {part('🛡️', 'tank')} · {part('💚', 'healer')} · {part('⚔️', 'dps')}{extra}")
-    text = "\n".join(lines)
+    text = "\n".join(raid_line(e) for e in rows[:15])
     if len(rows) > 15:
         text += f"\n…and {len(rows) - 15} more"
     await interaction.response.send_message(text[:2000], ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
@@ -1377,7 +1529,7 @@ async def member_character_autocomplete(interaction: discord.Interaction, curren
     uid = getattr(getattr(interaction.namespace, "member", None), "id", None)
     if not uid:
         return []
-    return [app_commands.Choice(name=f"{c['name']} ({c['spec']} {c['wow_class']})"[:100], value=c["name"])
+    return [app_commands.Choice(name=char_label(c), value=c["name"])
             for c in db.characters(uid) if current.lower() in c["name"].lower()][:25]
 
 
@@ -1441,13 +1593,58 @@ async def raid_add(interaction: discord.Interaction, event_id: int, member: disc
     await update_event(event_id)
 
 
-@raid.command(name="roster", description="Private, copy-friendly list of who is coming")
+@raid.command(name="promote", description="Move a benched player into the raid, ahead of the line")
+@app_commands.describe(member="The benched player to move in",
+                       over_limit="Move them in even if their role or class is already full (default: no)")
 @app_commands.autocomplete(event_id=event_autocomplete)
-async def raid_roster(interaction: discord.Interaction, event_id: int):
+async def raid_promote(interaction: discord.Interaction, event_id: int, member: discord.Member,
+                       over_limit: bool = False):
+    event = await _get_event(interaction, event_id)
+    if not event:
+        return await interaction.response.send_message("Event not found.", ephemeral=True)
+    if time.time() >= event["start_ts"]:
+        return await interaction.response.send_message("That raid has already started.", ephemeral=True)
+    quiet = discord.AllowedMentions.none()
+    row = db.signup(event_id, member.id)
+    if not row or row["status"] != "bench":
+        now = f"is **{row['status']}**" if row else "isn't signed up"
+        return await interaction.response.send_message(
+            f"{member.mention} {now} for **{event['title']}**, so there's nothing to promote. "
+            "`/raid promote` is for players on the bench; `/raid add` changes anyone's status.",
+            ephemeral=True, allowed_mentions=quiet)
+    if not row["role"] or not row["char_name"]:
+        return await interaction.response.send_message(
+            f"{member.mention} is on the bench without a character. Use `/raid add` to sign them up as one.",
+            ephemeral=True, allowed_mentions=quiet)
+    full = ""
+    if apply_cap(event, member.id, row["role"], "in", row["wow_class"])[0] == "bench":  # their role or class is full
+        full = bench_reason(event, member.id, row["role"], row["wow_class"])
+    if full and not over_limit:
+        return await interaction.response.send_message(
+            f"Nothing was changed: {full}. Move someone out first, or run it again with `over_limit: True` "
+            "to take them in anyway.", ephemeral=True, allowed_mentions=quiet)
+    status = row["bench_from"] if row["bench_from"] in ("in", "late") else "in"  # a benched 'late' stays late
+    db.set_signup(event_id, member.id, row["char_name"], row["wow_class"], row["spec"], row["role"], status, None)
+    text = f"Moved {member.mention} off the bench: **{row['char_name']}** is now **{status}** for **{event['title']}**."
+    if full:
+        text += f" ({full[0].upper()}{full[1:]}, so this goes over the limit.)"
+    await audit(interaction.guild_id, f"⬆️ {interaction.user.mention} promoted {member.mention} from the bench for "
+                f"**{event['title']}** (#{event_id}){' over the limit' if full else ''}")
+    await interaction.response.send_message(text, ephemeral=True, allowed_mentions=quiet)
+    await tell_player(event, member.id, f"🎉 An officer moved you off the bench for **{event['title']}**. You're {status}!")
+    await update_event(event_id)
+
+
+@raid.command(name="roster", description="Private, copy-friendly list of who is coming")
+@app_commands.describe(invites="True = /invite Name-Realm lines for everyone who is in, to paste into WoW")
+@app_commands.autocomplete(event_id=event_autocomplete)
+async def raid_roster(interaction: discord.Interaction, event_id: int, invites: bool = False):
     event = await _get_event(interaction, event_id)
     if not event:
         return await interaction.response.send_message("Event not found.", ephemeral=True)
     signups = db.signups(event_id)
+    if invites:
+        return await interaction.response.send_message(invite_export(event, signups), ephemeral=True)
     groups = {g: [] for g in wd.GROUPS}
     for x in signups:
         if x["status"] in ("in", "late") and x["char_name"] and not x["no_show"]:  # no-shows aren't "coming"
@@ -1458,7 +1655,56 @@ async def raid_roster(interaction: discord.Interaction, event_id: int):
     bench = [x["char_name"] for x in signups if x["status"] == "bench" and x["char_name"]]
     if bench:
         lines.append(f"Bench ({len(bench)}): {', '.join(bench)}")
-    await interaction.response.send_message("```\n" + "\n".join(lines) + "\n```", ephemeral=True)
+    noted = [x for x in signups if x["note"] and x["status"] != "absent"] if notes_mode(event["guild_id"]) != "off" else []
+    if noted:  # /config notes: the players' own notes, e.g. "late 15 min"
+        lines.append("")
+        lines.append(f"Notes ({len(noted)}):")
+        member = getattr(interaction.guild, "get_member", lambda _: None)
+        for x in noted:
+            who = x["char_name"] or getattr(member(x["user_id"]), "display_name", None) or f"user {x['user_id']}"
+            lines.append(f"  {who} ({x['status']}): {x['note']}")
+    await interaction.response.send_message(_clip_block(lines), ephemeral=True)
+
+
+MACRO_LIMIT = 255  # characters in one WoW macro
+
+
+def invite_name(name: str, realm: str | None) -> str:
+    """How WoW wants a name for /invite: Name-Realm, with the spaces taken out of the realm ("Area 52" -> "Area52")."""
+    realm = "".join((realm or "").split())
+    return f"{name}-{realm}" if realm else name
+
+
+def invite_export(event, signups) -> str:
+    """/raid roster invites: one /invite line per player who is in (or late), grouped into blocks that each fit in a
+    WoW macro. The realm comes from the saved character (always, not only with /config realms), so players from
+    another realm get the Name-Realm form that WoW needs."""
+    coming = [x for x in signups if x["status"] in ("in", "late") and x["char_name"] and not x["no_show"]]
+    missing = sum(1 for x in signups if x["status"] in ("in", "late") and not x["char_name"] and not x["no_show"])
+    if not coming:
+        return f"Nobody with a character is in for **{event['title']}** yet, so there's nobody to invite."
+    realms = db.realms_for(coming)
+    lines, size = [], 0
+    for x in coming:
+        line = f"/invite {invite_name(x['char_name'], realms.get(x['user_id']))}"
+        if lines and size + len(line) + 1 > MACRO_LIMIT:
+            lines.append("")  # a blank line starts the next macro-sized block
+            size = 0
+        lines.append(line)
+        size += len(line) + 1
+    text = (f"**{event['title']}**: {len(coming)} to invite. Paste a line into WoW chat, or each block into its own "
+            "macro (a macro holds 255 characters).")
+    if missing:
+        text += f" {missing} signed up without a character, so they aren't listed."
+    return text + "\n" + _clip_block(lines, 1980 - len(text))
+
+
+def _clip_block(lines: list[str], room: int = 1980) -> str:
+    """The roster as one code block, cut to fit in a Discord message (2000 characters, or `room` for the block)."""
+    body = "\n".join(lines)
+    if len(body) > room:
+        body = body[:room - 10].rsplit("\n", 1)[0] + "\n…"
+    return "```\n" + body + "\n```"
 
 
 @raid.command(name="close", description="Close or reopen signups for an event")
@@ -1474,28 +1720,150 @@ async def raid_close(interaction: discord.Interaction, event_id: int):
     await refresh_message(event_id)
 
 
-@raid.command(name="cancel", description="Delete an event and its post")
+class ConfirmView(discord.ui.View):
+    """Private "are you sure?" buttons for a step that deletes something (/config confirm turns them on for officers'
+    deletes, off by default; /forgetme always asks). Only the person who ran the command sees them (the reply is
+    ephemeral). No answer within a minute means nothing happens."""
+
+    def __init__(self, interaction: discord.Interaction, confirm_label: str, action):
+        super().__init__(timeout=60)
+        self.interaction, self.action = interaction, action  # action(click, reply) does the work, reply(text) answers
+        self.yes.label = confirm_label
+
+    @discord.ui.button(label="Yes", style=discord.ButtonStyle.danger)
+    async def yes(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.stop()
+        await self.action(interaction, lambda text: interaction.response.edit_message(content=text, view=None))
+
+    @discord.ui.button(label="No, keep it", style=discord.ButtonStyle.secondary)
+    async def no(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.stop()
+        await interaction.response.edit_message(content="Nothing was changed.", view=None)
+
+    async def on_timeout(self):
+        try:
+            await self.interaction.edit_original_response(content="No answer, so nothing was changed.", view=None)
+        except discord.HTTPException:
+            pass
+
+
+async def confirm_then(interaction: discord.Interaction, question: str, label: str, action) -> None:
+    """Ask first if /config confirm is on, otherwise do it straight away. `action(interaction, reply)` does the work;
+    `reply(text)` answers privately either way."""
+    if db.setting(interaction.guild_id, "confirm_deletes", "0") != "1":
+        return await action(interaction, lambda text: interaction.response.send_message(
+            text, ephemeral=True, allowed_mentions=discord.AllowedMentions.none()))
+    await interaction.response.send_message(question, view=ConfirmView(interaction, label, action), ephemeral=True,
+                                            allowed_mentions=discord.AllowedMentions.none())
+
+
+def _signup_count(event_id: int) -> str:
+    rows = db.signups(event_id)
+    coming = sum(1 for r in rows if r["status"] in ("in", "late"))
+    return f"{plural(len(rows), 'signup')} ({coming} coming)" if rows else "no signups"
+
+
+@raid.command(name="cancel", description="Delete an event and its post (/raid restore undoes it)")
 @app_commands.autocomplete(event_id=event_autocomplete)
 async def raid_cancel(interaction: discord.Interaction, event_id: int):
     event = await _get_event(interaction, event_id)
     if not event:
         return await interaction.response.send_message("Event not found.", ephemeral=True)
-    await delete_event_post(event)
-    db.delete_event(event_id)
-    await audit(interaction.guild_id, f"🗑️ {interaction.user.mention} cancelled **{event['title']}** (#{event_id})")
-    await interaction.response.send_message(f"Event #{event_id} deleted.", ephemeral=True)
+    when = f"<t:{event['start_ts']}:f>"
+
+    async def do_cancel(click: discord.Interaction, reply):
+        current = db.event(event_id)
+        if not current:
+            return await reply(f"Event #{event_id} is already gone.")
+        db.cancel_event(event_id, click.user.id)
+        await reply(f"Event #{event_id} (**{current['title']}**) cancelled. Changed your mind? "
+                    f"`/raid restore` brings it back with its signups for the next {KEEP_CANCELLED_DAYS} days.")
+        await delete_event_post(current)
+        await audit(click.guild_id, f"🗑️ {click.user.mention} cancelled **{current['title']}** (#{event_id})")
+
+    await confirm_then(
+        interaction, f"Cancel **{event['title']}** ({when}, #{event_id})? Its post goes away and it has "
+                     f"{_signup_count(event_id)}.", "Yes, cancel it", do_cancel)
+
+
+async def cancelled_autocomplete(interaction: discord.Interaction, current: str):
+    out = []
+    for c in db.cancelled_events(interaction.guild_id):
+        when = datetime.fromtimestamp(c["start_ts"], guild_tz(interaction.guild_id)).strftime("%a %b %d %H:%M")
+        label = f"{c['title']} · {when} (#{c['event_id']})"
+        if current.lower() in label.lower():
+            out.append(app_commands.Choice(name=label[:100], value=c["event_id"]))
+    return out[:25]
+
+
+@raid.command(name="restore", description="Bring back a raid cancelled in the last 14 days, with its signups")
+@app_commands.describe(event_id="The cancelled raid (the list shows this server's recent cancellations)")
+@app_commands.autocomplete(event_id=cancelled_autocomplete)
+async def raid_restore(interaction: discord.Interaction, event_id: int):
+    copy = db.cancelled_event(event_id)
+    if not copy or copy["guild_id"] != interaction.guild_id:
+        return await interaction.response.send_message(
+            f"There's no cancelled raid #{event_id} to restore. Raids can be restored for "
+            f"{KEEP_CANCELLED_DAYS} days after they're cancelled.", ephemeral=True)
+    if not can_manage_channel(interaction, copy["channel_id"]):
+        return await interaction.response.send_message(
+            "You can only manage raids in channels you're an officer for.", ephemeral=True)
+    channel = bot.get_channel(copy["channel_id"])
+    if channel is None:
+        return await interaction.response.send_message(
+            "The raid's channel no longer exists, so there's nowhere to post it again.", ephemeral=True)
+    restored = db.restore_event(event_id)
+    if restored is None:
+        return await interaction.response.send_message(f"Raid #{event_id} has already been restored.", ephemeral=True)
+    event = db.event(event_id)
+    locked = is_locked(event)
+    try:
+        msg = await channel.send(embed=render_embed(event, db.signups(event_id), locked),
+                                 view=ClosedView() if locked else RaidView(spec_switch_on(event["guild_id"])),
+                                 allowed_mentions=discord.AllowedMentions.none())
+    except discord.HTTPException:
+        db.undo_restore(copy)  # put it back the way it was, so it can still be restored later
+        return await interaction.response.send_message(
+            f"I couldn't post in {channel.mention}, so the raid is still cancelled. Check my permissions there.",
+            ephemeral=True)
+    db.set_message_id(event_id, msg.id)
+    schedule_board(interaction.guild_id)
+    sched_soon(event_id)
+    notes = ""
+    if json.loads(copy["event_json"]).get("thread_id"):  # it had a discussion thread: start a new one
+        when = datetime.fromtimestamp(event["start_ts"], guild_tz(interaction.guild_id))
+        try:
+            th = await msg.create_thread(name=f"{event['title']} · {when:%b %d}"[:100], auto_archive_duration=10080)
+            db.update_event(event_id, thread_id=th.id)
+        except discord.DiscordException:
+            notes = " (I couldn't start its discussion thread again.)"
+    await audit(interaction.guild_id, f"♻️ {interaction.user.mention} restored **{event['title']}** (#{event_id})")
+    await interaction.response.send_message(
+        f"Restored **{event['title']}** with {plural(restored, 'signup')}: {getattr(msg, 'jump_url', '')}{notes}",
+        ephemeral=True)  # signups come back exactly as they were, so nobody is promoted or messaged here
 
 
 @raid.command(name="remove", description="Remove a member's signup")
 @app_commands.autocomplete(event_id=event_autocomplete)
 async def raid_remove(interaction: discord.Interaction, event_id: int, member: discord.Member):
-    if not await _get_event(interaction, event_id):
+    event = await _get_event(interaction, event_id)
+    if not event:
         return await interaction.response.send_message("Event not found.", ephemeral=True)
-    db.remove_signup(event_id, member.id)
-    await audit(interaction.guild_id, f"🚫 {interaction.user.mention} removed {member.mention} from #{event_id}")
-    await interaction.response.send_message(f"Removed {member.mention} from event #{event_id}.",
-                                            ephemeral=True)
-    await update_event(event_id)
+    row = db.signup(event_id, member.id)
+    if not row:
+        return await interaction.response.send_message(
+            f"{member.mention} isn't signed up for **{event['title']}**, so there's nothing to remove.",
+            ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+    what = f"{row['char_name']}, {row['status']}" if row["char_name"] else row["status"]
+
+    async def do_remove(click: discord.Interaction, reply):
+        db.remove_signup(event_id, member.id)
+        await reply(f"Removed {member.mention} from event #{event_id}.")
+        await audit(click.guild_id, f"🚫 {click.user.mention} removed {member.mention} from #{event_id}")
+        await update_event(event_id)
+
+    await confirm_then(interaction, f"Remove {member.mention} ({what}) from **{event['title']}** (#{event_id})?",
+                       "Yes, remove", do_remove)
 
 
 @raid.command(name="unsigned", description="List members of a role who haven't responded")
@@ -1798,6 +2166,459 @@ async def _run_digest(now: int) -> None:
             db.set_setting(g, "digest_last", week)
 
 
+BACKUP_POST_HOUR = 4  # the daily backup post goes out at the first check after 04:00 server time
+BACKUP_POSTS_KEPT = 7  # older backup posts are deleted, like the backups folder
+BACKUP_POST_MAX = 8 * 1024 * 1024  # Discord's upload limit for bots, with room to spare
+
+
+def backup_channel_problem(channel) -> Optional[str]:
+    """Why this channel can't take the daily backup post, or None if it can. Everyone in the server being able
+    to see it is a problem: the file holds members' Discord IDs."""
+    guild = channel.guild
+    if channel.permissions_for(guild.default_role).view_channel:
+        return (f"{channel.mention} can be seen by everyone in the server. The backup holds your members' Discord IDs, "
+                "so pick a channel only admins can see (turn off View Channel for @everyone).")
+    mine = channel.permissions_for(guild.me)
+    missing = [name for name, ok in (("View Channel", mine.view_channel), ("Send Messages", mine.send_messages),
+                                     ("Attach Files", mine.attach_files)) if not ok]
+    if missing:
+        return f"I need {', '.join(missing)} in {channel.mention} to post the backup there."
+    return None
+
+
+async def _backup_post_one(guild_id: int, day: str):
+    """The optional daily backup post (/config backupchannel): a copy of this server's data, as a file."""
+    channel = bot.get_channel(int_setting(guild_id, "backup_channel"))
+    if channel is None:
+        return True  # channel deleted or out of reach: skip today, /status and the folder backups still work
+    problem = backup_channel_problem(channel)
+    if problem:  # e.g. the channel was made public after it was chosen: never post the file then
+        log.warning("Daily backup post skipped for guild %s: %s", guild_id, problem)
+        note_error(f"daily backup post skipped: {problem}")
+        return True
+    with tempfile.TemporaryDirectory() as folder:
+        path = Path(folder) / f"raidbot-{day}.db"
+        db.snapshot_for_guild(path, guild_id)
+        size = path.stat().st_size
+        try:
+            if size > BACKUP_POST_MAX:
+                msg = await channel.send(f"🗄️ Daily backup for {day}: the database is {size // 1024 // 1024} MB, too big "
+                                         "to attach. The bot's `backups` folder still has a copy.")
+            else:
+                msg = await channel.send(
+                    f"🗄️ Daily backup for {day}: this server's raids, signups, characters and settings. It holds members' "
+                    "Discord IDs, so keep this channel private. To restore, stop the bot and put this file in place of "
+                    "`raidbot.db` (it only holds this server's data, so if the bot runs in other servers too, use the "
+                    "`backups` folder instead).",
+                    file=discord.File(io.BytesIO(path.read_bytes()), filename=path.name))
+        except discord.HTTPException as err:
+            log.warning("Daily backup post failed for guild %s: %s", guild_id, err)
+            return False
+    posts = [p for p in (db.setting(guild_id, "backup_posts") or "").split(",") if p] + [f"{channel.id}:{msg.id}"]
+    for old in posts[:-BACKUP_POSTS_KEPT]:  # keep the newest few, like the backups folder
+        cid, mid = (int(x) for x in old.split(":"))
+        old_channel = bot.get_channel(cid)
+        try:
+            if old_channel is not None:
+                await old_channel.get_partial_message(mid).delete()
+        except discord.NotFound:
+            pass
+        except discord.HTTPException as err:
+            log.warning("Couldn't delete an old backup post in guild %s: %s", guild_id, err)
+    db.set_setting(guild_id, "backup_posts", ",".join(posts[-BACKUP_POSTS_KEPT:]))
+    return True
+
+
+async def _run_backuppost(now: int) -> None:
+    for g in db.guilds_with_key("backup_channel"):
+        local = datetime.fromtimestamp(now, guild_tz(g))
+        day = local.date().isoformat()
+        last = db.setting(g, "backup_post_last")
+        if last == day or (last and local.hour < BACKUP_POST_HOUR):
+            continue  # already posted today, or before 04:00 (the very first copy goes out straight away)
+        if await _attempt("backuppost", g, partial(_backup_post_one, g, day)):
+            db.set_setting(g, "backup_post_last", day)
+
+
+# ---------------------------------------------------------------- the Upcoming raids board (/config board)
+BOARD_MAX = 15  # raids listed on the board; the rest are counted
+BOARD_DELAY = 3  # seconds to wait after a change, so a rush of signups costs one edit of the board
+_board_busy: dict[int, bool] = {}  # guild id -> "changed again while the board was being drawn"
+_board_drawn: dict[int, tuple] = {}  # guild id -> (message id, text) last shown, so an unchanged board isn't edited
+_board_soon: set[int] = set()  # guilds with a redraw already waiting
+_board_tasks: set = set()  # keeps the waiting redraws alive until they run
+
+
+def board_can_show(board_channel, raid_channel_id: int) -> bool:
+    """A raid goes on the board only if everyone who can read the board can also see the raid's channel (checked
+    role by role), so a raid in an officers-only or team-only channel never shows up on a public board. The
+    low-signup alert uses the same rule for its channel."""
+    if raid_channel_id == board_channel.id:
+        return True
+    raid_channel = bot.get_channel(raid_channel_id)
+    if raid_channel is None:
+        return False
+    roles = getattr(board_channel.guild, "roles", None) or [board_channel.guild.default_role]
+    return not any(board_channel.permissions_for(r).view_channel and not raid_channel.permissions_for(r).view_channel
+                   for r in roles)
+
+
+def board_raids(guild_id: int, board_channel, now: int) -> tuple[list, int]:
+    """(raids to list, how many upcoming raids were left off because some board readers can't see their channel)."""
+    rows = [e for e in db.upcoming_events(guild_id, now) if e["message_id"]]
+    shown = [e for e in rows if board_can_show(board_channel, e["channel_id"])]
+    return shown, len(rows) - len(shown)
+
+
+def board_embed(guild_id: int, board_channel, now: int):
+    raids, _ = board_raids(guild_id, board_channel, now)
+    if raids:
+        text = "\n\n".join(raid_line(e, show_id=False) for e in raids[:BOARD_MAX])
+        if len(raids) > BOARD_MAX:
+            text += f"\n\n…and {plural(len(raids) - BOARD_MAX, 'more raid')} after these."
+    else:
+        text = "No raids planned right now. New raids show up here as soon as they're posted."
+    embed = discord.Embed(title="📅 Upcoming raids", description=text[:4000], colour=discord.Colour.blurple())
+    embed.set_footer(text="Updates by itself. Click a raid's name to go to its post and sign up.")
+    return embed
+
+
+def schedule_board(guild_id: int) -> None:
+    """Redraw the board a few seconds from now (once, however many changes come in meanwhile). Does nothing when
+    the board is off."""
+    if not guild_id or guild_id in _board_soon or not db.setting(guild_id, "board_channel"):
+        return
+
+    async def later():
+        try:
+            await asyncio.sleep(BOARD_DELAY)
+        finally:
+            _board_soon.discard(guild_id)
+        await draw_board(guild_id)
+
+    _board_soon.add(guild_id)
+    task = asyncio.get_running_loop().create_task(later())
+    _board_tasks.add(task)
+    task.add_done_callback(_board_tasks.discard)
+
+
+async def draw_board(guild_id: int) -> bool:
+    """Bring the board up to date. Like refresh_message, a change during a draw makes that draw run once more
+    instead of starting a second one (which could post two boards). False means try again later."""
+    if guild_id in _board_busy:
+        _board_busy[guild_id] = True
+        return True
+    try:
+        while True:
+            _board_busy[guild_id] = False
+            ok = await _draw_board(guild_id)
+            if not _board_busy[guild_id]:
+                return ok
+    finally:
+        _board_busy.pop(guild_id, None)
+
+
+async def _draw_board(guild_id: int) -> bool:
+    channel = bot.get_channel(int_setting(guild_id, "board_channel"))
+    if channel is None:
+        return True  # board off, or its channel was deleted: nothing to draw
+    embed = board_embed(guild_id, channel, int(time.time()))
+    message_id = int_setting(guild_id, "board_message")
+    if message_id:
+        if _board_drawn.get(guild_id) == (message_id, embed.description):
+            return True
+        try:
+            await channel.get_partial_message(message_id).edit(content=None, embed=embed)
+            _board_drawn[guild_id] = (message_id, embed.description)
+            return True
+        except discord.NotFound:
+            pass  # deleted by hand: post a new one below
+        except discord.HTTPException as e:
+            log.warning("Could not edit the raid board in guild %s: %s", guild_id, e)
+            note_error(f"could not update the Upcoming raids board: {e}")
+            return False
+    try:
+        msg = await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+    except discord.HTTPException as e:
+        log.warning("Could not post the raid board in guild %s: %s", guild_id, e)
+        note_error(f"could not post the Upcoming raids board: {e}")
+        return False
+    db.set_setting(guild_id, "board_message", msg.id)
+    _board_drawn[guild_id] = (msg.id, embed.description)
+    await pin_board(msg)
+    return True
+
+
+async def pin_board(msg) -> bool:
+    try:
+        await msg.pin(reason="Upcoming raids board (/config board)")
+        return True
+    except discord.HTTPException:
+        return False
+
+
+async def remove_board(guild_id: int) -> None:
+    """Delete the current board message, if there is one (ignoring one that's already gone)."""
+    channel = bot.get_channel(int_setting(guild_id, "board_channel"))
+    message_id = int_setting(guild_id, "board_message")
+    db.set_setting(guild_id, "board_message", None)
+    _board_drawn.pop(guild_id, None)
+    if channel is not None and message_id:
+        try:
+            await channel.get_partial_message(message_id).delete()
+        except discord.HTTPException:
+            pass
+
+
+async def _run_board(now: int) -> None:
+    for g in db.guilds_with_key("board_channel"):  # raids that started drop off; an unchanged board isn't touched
+        await _attempt("board", g, partial(draw_board, g))
+
+
+# ---------------------------------------------------------------- low-signup alert (/alerts lowsignup)
+def lowsignup_inside(guild_id: int, start_ts: int) -> bool:
+    """True if a raid starting at start_ts is already inside the /config lowsignup window."""
+    hours = int_setting(guild_id, "lowsignup_hours")
+    return bool(hours and int_setting(guild_id, "lowsignup_channel") and start_ts - hours * 3600 <= time.time())
+
+
+def lowsignup_short(event, minimum: int) -> list[str]:
+    """What the raid is short of: open slots in each role that has a limit, and people below `minimum` (0 = no
+    minimum). Empty means the raid looks fine."""
+    attending = [x for x in db.signups(event["id"]) if x["status"] in ("in", "late")]
+    short = []
+    if minimum and len(attending) < minimum:
+        short.append(f"{len(attending)}/{minimum} people in")
+    names = {"tank": "tank", "healer": "healer", "dps": "DPS"}
+    for role in wd.ROLES:
+        cap = event[f"cap_{role}"]
+        have = sum(1 for x in attending if x["role"] == role)
+        if cap and have < cap:
+            short.append(f"{cap - have} {names.get(role, role)} slot{'s' if cap - have != 1 else ''} open ({have}/{cap})")
+    return short
+
+
+def lowsignup_ping_role(event, raid_channel):
+    """The officer role to ping for this raid: its channel's (or category's) raid leaders, else the server's."""
+    ids = scoped_role_ids(event["guild_id"], raid_channel, "officer_role") if raid_channel else []
+    role_id = ids[0] if ids else int_setting(event["guild_id"], "officer_role")
+    guild = getattr(raid_channel, "guild", None)
+    return guild.get_role(role_id) if guild is not None and role_id else None
+
+
+async def _lowsignup_one(event, now: int):
+    g = event["guild_id"]
+    hours = int_setting(g, "lowsignup_hours")
+    channel = bot.get_channel(int_setting(g, "lowsignup_channel"))
+    if not hours or channel is None:
+        return WAIT  # off (or its channel is gone): the raid stays unchecked, in case it's turned on later
+    if event["start_ts"] - hours * 3600 > now:
+        return WAIT
+    short = lowsignup_short(event, int_setting(g, "lowsignup_min"))
+    if not short:
+        return True  # enough people: the check is done for this raid
+    if not board_can_show(channel, event["channel_id"]):
+        log.info("Low-signup alert for raid %s skipped: some readers of the alert channel can't see the raid", event["id"])
+        return True  # never tell a wider audience about a raid in a more private channel
+    link = f"https://discord.com/channels/{g}/{event['channel_id']}/{event['message_id']}"
+    text = (f"⚠️ **Low signups:** [**{event['title']}**]({link}) in <#{event['channel_id']}> starts "
+            f"<t:{event['start_ts']}:R> and is short: " + "; ".join(short) + ".")
+    role = lowsignup_ping_role(event, bot.get_channel(event["channel_id"])) if db.setting(g, "lowsignup_ping") == "1" else None
+    if role is not None:
+        text = f"{role.mention} {text}"
+    try:
+        await channel.send(text[:2000], allowed_mentions=discord.AllowedMentions(everyone=False, users=False, roles=[role])
+                           if role is not None
+                           else discord.AllowedMentions.none())
+    except discord.HTTPException as e:
+        log.warning("Low-signup alert failed for event %s: %s", event["id"], e)
+        note_error(f"low-signup alert for raid #{event['id']}: {e}")
+        return False
+    return True
+
+
+async def _run_lowsignup(now: int) -> None:
+    on = set(db.guilds_with_key("lowsignup_channel"))
+    for event in (e for e in db.pending_lowsignup(now) if e["guild_id"] in on):  # optional: tell officers a raid is short (/alerts lowsignup)
+        if await _attempt("lowsignup", event["id"], partial(_lowsignup_one, event, now)):
+            db.update_event(event["id"], low_alerted=1)
+
+
+# ---------------------------------------------------------------- Discord Scheduled Events (/alerts events)
+SCHED_LENGTH_DEFAULT = 3  # hours a raid's Scheduled Event lasts unless /alerts events length says otherwise
+SCHED_KEEP_CHECKING = 2 * 86400  # how long after the start a raid's event is still looked after (to end it)
+SCHED_MAX_FAILS = 5
+_sched_fails: dict[int, int] = {}
+_sched_tasks: set = set()
+
+
+def sched_events_on(guild_id: int) -> bool:
+    return db.setting(guild_id, "sched_events") == "1"
+
+
+def sched_length(guild_id: int) -> int:
+    return int_setting(guild_id, "sched_events_hours", SCHED_LENGTH_DEFAULT) or SCHED_LENGTH_DEFAULT
+
+
+def sched_can_show(guild, raid_channel_id: int) -> bool:
+    """Every member of the server can see its Scheduled Events, so a raid gets one only if every role (@everyone
+    included) can see the raid's channel. A raid in an officers-only or team-only channel never gets one."""
+    channel = bot.get_channel(raid_channel_id) if guild is not None else None
+    if channel is None:
+        return False
+    roles = getattr(guild, "roles", None) or [guild.default_role]
+    return all(channel.permissions_for(r).view_channel for r in roles)
+
+
+def sched_can_manage(guild) -> bool:
+    perms = getattr(getattr(guild, "me", None), "guild_permissions", None)
+    return bool(perms and (perms.manage_events or perms.administrator))
+
+
+def sched_fields(event) -> dict:
+    """What the raid's Scheduled Event should say: its title, times, a link to the post as the location, and the
+    raid's description."""
+    g, start = event["guild_id"], datetime.fromtimestamp(event["start_ts"], timezone.utc)
+    link = f"https://discord.com/channels/{g}/{event['channel_id']}/{event['message_id']}"
+    channel = bot.get_channel(event["channel_id"])
+    where = f"#{channel.name}" if channel is not None else "the raid channel"
+    text = (event["description"] or "").strip()
+    text = (text[:850] + "\n\n" if text else "") + f"Sign up on the raid post in {where}: {link}"
+    return {"name": event["title"][:100], "start_time": start, "end_time": start + timedelta(hours=sched_length(g)),
+            "location": link[:100], "description": text[:1000]}
+
+
+async def _sched_get(guild, sid: int):
+    """The Scheduled Event with this id, or None if it was deleted (by hand, or by Discord after it ended)."""
+    found = guild.get_scheduled_event(sid)
+    if found is not None:
+        return found
+    try:
+        return await guild.fetch_scheduled_event(sid)
+    except discord.NotFound:
+        return None
+
+
+async def remove_sched_event(guild, sid: int) -> bool:
+    """Delete one Scheduled Event, ignoring one that's already gone. False means it could not be deleted."""
+    if guild is None or not sid or sid < 0:
+        return True
+    target = guild.get_scheduled_event(sid)
+    try:
+        if target is None:
+            target = await guild.fetch_scheduled_event(sid)
+        await target.delete(reason="Raid cancelled or no longer shown (/alerts events)")
+    except discord.NotFound:
+        return True
+    except discord.HTTPException as e:
+        log.warning("Could not delete Scheduled Event %s in guild %s: %s", sid, guild.id, e)
+        return False
+    return True
+
+
+async def sync_sched_event(event_id: int, now: Optional[int] = None):
+    """Bring one raid's Discord Scheduled Event in line with the raid: create it, update its title, time or
+    description, start it when the raid starts and end it when the raid is over, or delete it when it shouldn't
+    exist (switched off, private channel, raid gone). True when done, False to try again, WAIT without Manage Events."""
+    now = int(time.time()) if now is None else now
+    event = db.event(event_id)
+    if not event:
+        return True  # cancelled: delete_event_post took its Scheduled Event with it
+    g, sid = event["guild_id"], event["sched_event_id"]
+    if sid < 0:
+        return True  # ended, or deleted by hand: hands off
+    guild = bot.get_guild(g)
+    if guild is None:
+        return WAIT
+    if not sched_can_manage(guild):
+        return WAIT  # without Manage Events nothing can be done; it starts working once the permission is given
+    end_ts = event["start_ts"] + sched_length(g) * 3600
+    wanted = sched_events_on(g) and event["message_id"] and sched_can_show(guild, event["channel_id"])
+    try:
+        if not wanted:
+            if sid and not await remove_sched_event(guild, sid):
+                return _sched_failed(event_id)
+            if sid:
+                db.update_event(event_id, sched_event_id=0)
+            return True
+        if not sid:
+            if event["start_ts"] <= now + 60:
+                return True  # already started (or about to): too late for a Scheduled Event
+            made = await guild.create_scheduled_event(entity_type=discord.EntityType.external,
+                                                      privacy_level=discord.PrivacyLevel.guild_only,
+                                                      reason=f"Raid #{event_id} (/alerts events)",
+                                                      **sched_fields(event))
+            db.update_event(event_id, sched_event_id=made.id)
+            return _sched_ok(event_id)
+        se = await _sched_get(guild, sid)
+        if se is None or se.status in (discord.EventStatus.completed, discord.EventStatus.cancelled):
+            db.update_event(event_id, sched_event_id=-1)  # deleted by hand, or over: never recreate it
+            return _sched_ok(event_id)
+        want = sched_fields(event)
+        if se.status == discord.EventStatus.scheduled:
+            if now >= end_ts:
+                await se.cancel(reason="The raid is over")
+                db.update_event(event_id, sched_event_id=-1)
+            elif event["start_ts"] <= now:
+                await se.start(reason="The raid is starting")
+            else:
+                changed = {k: v for k, v in want.items() if (getattr(se, k, None) or "") != v}
+                if changed:
+                    await se.edit(**changed, reason="Raid edited")
+        elif se.status == discord.EventStatus.active:
+            if now >= end_ts:
+                await se.end(reason="The raid is over")
+                db.update_event(event_id, sched_event_id=-1)
+            else:
+                changed = {k: want[k] for k in ("name", "description") if (getattr(se, k, None) or "") != want[k]}
+                if changed:
+                    await se.edit(**changed, reason="Raid edited")
+    except discord.HTTPException as e:
+        log.warning("Scheduled Event for raid %s: %s", event_id, e)
+        note_error(f"Discord Scheduled Event for raid #{event_id}: {e}")
+        return _sched_failed(event_id)
+    return _sched_ok(event_id)
+
+
+def _sched_ok(event_id: int) -> bool:
+    _sched_fails.pop(event_id, None)
+    return True
+
+
+def _sched_failed(event_id: int) -> bool:
+    """False (try again next minute), until a raid has failed SCHED_MAX_FAILS times in a row: then its Scheduled
+    Event is left alone for good, so a stuck one doesn't log an error every minute."""
+    _sched_fails[event_id] = _sched_fails.get(event_id, 0) + 1
+    if _sched_fails[event_id] < SCHED_MAX_FAILS:
+        return False
+    _sched_fails.pop(event_id, None)
+    log.error("Giving up on the Scheduled Event for raid #%s", event_id)
+    db.update_event(event_id, sched_event_id=-1)
+    return True
+
+
+def sched_soon(event_id: int) -> None:
+    """Sync a raid's Scheduled Event in the background now, instead of waiting for the next minute. Does nothing
+    when the feature is off and the raid has no Scheduled Event."""
+    event = db.event(event_id)
+    if not event or not (sched_events_on(event["guild_id"]) or event["sched_event_id"] > 0):
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    task = loop.create_task(_attempt("scheduled event", event_id, partial(sync_sched_event, event_id)))
+    _sched_tasks.add(task)
+    task.add_done_callback(_sched_tasks.discard)
+
+
+async def _run_sched(now: int) -> None:
+    on = set(db.guilds_with_key("sched_events"))
+    for event in db.sched_candidates(now, now - SCHED_KEEP_CHECKING):
+        if event["sched_event_id"] > 0 or event["guild_id"] in on:
+            await _attempt("scheduled event", event["id"], partial(sync_sched_event, event["id"], now))
+
+
 async def _run_locks(now: int) -> None:
     for event in db.due_lock(now):  # start time passed: show "This event is closed."
         if await _attempt("lock", event["id"], partial(refresh_message, event["id"])):
@@ -1832,7 +2653,7 @@ async def _run_nudges(now: int) -> None:
 async def reminder_loop():
     now = int(time.time())
     for step in (_run_autoclose, _run_locks, _run_voicecheck, _run_repeats, _run_archive, _run_reminders, _run_nudges,
-                 _run_digest, _run_updatecheck):
+                 _run_lowsignup, _run_sched, _run_digest, _run_backuppost, _run_board, _run_updatecheck):
         try:
             await step(now)
         except Exception as e:  # e.g. a database error: log it, and still run the other steps
@@ -1864,6 +2685,10 @@ async def backup_loop():
             log.info("Backed up the database to %s", made.name)
     except Exception as e:  # a failed backup must never stop the bot
         log.warning("Database backup failed: %s", e)
+    try:
+        db.purge_cancelled()  # cancelled raids can be restored for 14 days, then they're gone for good
+    except Exception as e:
+        log.warning("Clearing old cancelled raids failed: %s", e)
 
 
 @reminder_loop.before_loop
@@ -1970,9 +2795,60 @@ async def myraids(interaction: discord.Interaction):
     label = {"in": "✅ in", "late": "⏰ late", "tentative": "❔ tentative", "bench": "🪑 bench", "absent": "❌ absent"}
     lines = [f"{label.get(r['my_status'], r['my_status'])} · <t:{r['start_ts']}:f> · "
              f"[{r['title']}](https://discord.com/channels/{r['guild_id']}/{r['channel_id']}/{r['message_id']})"
+             + (f" · *{r['my_note']}*" if r["my_note"] and notes_mode(interaction.guild_id) != "off" else "")
              for r in rows[:15]]
     await interaction.response.send_message("\n".join(lines), ephemeral=True,
                                             allowed_mentions=discord.AllowedMentions.none())
+
+
+async def my_signup_autocomplete(interaction: discord.Interaction, current: str):
+    """Upcoming raids this player has answered, as 'Title · Nov 14 20:00 (#id)'."""
+    tz = guild_tz(interaction.guild_id)
+    out = []
+    for e in db.user_upcoming(interaction.guild_id, interaction.user.id, int(time.time()) - NOTE_GRACE):
+        label = f"{e['title']} · {datetime.fromtimestamp(e['start_ts'], tz).strftime('%b %d %H:%M')} (#{e['id']})"
+        if current.lower() in label.lower():
+            out.append(app_commands.Choice(name=label[:100], value=e["id"]))
+    return out[:25]
+
+
+NOTE_GRACE = 6 * 3600  # a note can still be changed this long after the raid started
+
+
+@bot.tree.command(name="note", description="Add a short note to your signup, e.g. 'late 15 min' (leave it out to clear it)")
+@app_commands.describe(raid="A raid you've signed up for",
+                       text=f"Up to {NOTE_MAX} characters, e.g. late 15 min. Leave it out to clear your note")
+@app_commands.autocomplete(raid=my_signup_autocomplete)
+@app_commands.guild_only()
+async def note(interaction: discord.Interaction, raid: int, text: Optional[str] = None):
+    g, uid = interaction.guild_id, interaction.user.id
+    mode = notes_mode(g)
+    if mode == "off":
+        return await interaction.response.send_message(
+            "Signup notes are off on this server. An admin can turn them on with `/config notes`.", ephemeral=True)
+    event = db.event(raid)
+    if not event or event["guild_id"] != g:
+        return await interaction.response.send_message("Raid not found. Pick one from the list.", ephemeral=True)
+    if not db.signup(raid, uid):
+        return await interaction.response.send_message(
+            f"You aren't signed up for **{event['title']}**. Sign up on the post first, then add a note.", ephemeral=True)
+    if event["archived"] or event["start_ts"] < time.time() - NOTE_GRACE:
+        return await interaction.response.send_message(f"**{event['title']}** is over, so its notes can't change.",
+                                                       ephemeral=True)
+    new = clean_note(text)
+    if text and text.strip() and not new:
+        return await interaction.response.send_message(
+            "That note is empty once formatting, mentions and links are taken out. Try plain words, e.g. `late 15 min`.",
+            ephemeral=True)
+    db.set_note(raid, uid, new)
+    seen = "on the raid post" if mode == "post" else "to the raid officers"
+    cut = f" (cut to {NOTE_MAX} characters)" if text and len(" ".join(text.split())) > NOTE_MAX else ""
+    await interaction.response.send_message(
+        f"Your note on **{event['title']}**: *{new}*{cut}. It's shown {seen}, and stays if you change your status."
+        if new else f"Cleared your note on **{event['title']}**.", ephemeral=True,
+        allowed_mentions=discord.AllowedMentions.none())
+    if mode == "post" and event["message_id"]:
+        await refresh_message(raid)
 
 
 @bot.tree.command(name="remindme", description="Get raid reminders as a private message instead of a ping in the channel")
@@ -1984,6 +2860,39 @@ async def remindme(interaction: discord.Interaction, on: bool):
         "Done. Before each raid you're signed up for I'll message you privately instead of pinging you in the channel. "
         "(If your private messages from this server are closed I'll ping you in the channel as usual.)" if on else
         "Done. You'll be pinged in the channel before raids, like everyone else.", ephemeral=True)
+
+
+def _forget_summary(counts: dict) -> str:
+    parts = [plural(counts["characters"], "character"), plural(counts["signups"], "raid signup"),
+             plural(counts["series"], "repeating-raid sign-up")]
+    if counts["settings"]:
+        parts.append("your /remindme setting")
+    if counts["cancelled"]:
+        parts.append(f"your place in {plural(counts['cancelled'], 'cancelled raid')}")
+    return ", ".join(parts)
+
+
+@bot.tree.command(name="forgetme", description="Delete your characters and your signup history from the bot (asks first)")
+async def forgetme(interaction: discord.Interaction):
+    counts = db.user_data_counts(interaction.user.id)
+    if not any(counts.values()):
+        return await interaction.response.send_message("The bot has nothing stored about you.", ephemeral=True)
+
+    async def do_forget(click: discord.Interaction, reply):
+        counts, event_ids = db.forget_user(click.user.id)
+        await reply(f"Done. Deleted {_forget_summary(counts)}. The bot no longer has anything stored about you.")
+        for event_id in event_ids:  # take their name off the posts, and move someone off the bench if a slot opened
+            event = db.event(event_id)
+            if event and event["message_id"] and not event["archived"]:
+                await update_event(event_id)
+
+    # Always asks, whatever /config confirm says: the player can't get this back.
+    await interaction.response.send_message(
+        f"Delete everything the bot stores about you, in every server it's in? That's {_forget_summary(counts)}. "
+        "Your attendance history goes with your signups and your name comes off the raid posts. "
+        "This can't be undone. (Raids you created stay. The bot's daily backups still hold the old data "
+        "until they're replaced, within 7 days.)",
+        view=ConfirmView(interaction, "Yes, delete my data", do_forget), ephemeral=True)
 
 
 always = app_commands.Group(name="always", description="Stay signed up to a repeating raid", guild_only=True)
@@ -2145,6 +3054,9 @@ class AdminGroup(app_commands.Group):
 
 
 config = AdminGroup(name="config", description="Bot settings for this server",
+                    default_permissions=discord.Permissions(manage_guild=True), guild_only=True)
+# /config holds Discord's maximum of 25 subcommands, so newer admin settings live in groups of their own
+alerts = AdminGroup(name="alerts", description="Optional alerts for officers",
                     default_permissions=discord.Permissions(manage_guild=True), guild_only=True)
 
 
@@ -2311,6 +3223,8 @@ class SetupView(discord.ui.View):
         async def flip(interaction: discord.Interaction):
             db.set_setting(self.guild_id, key, "0" if self._on(key) else "1")
             await self._again(interaction)
+            if key in ("show_realms", "signup_notes", "spec_switch"):  # these change how the posts look
+                await redraw_open_posts(self.guild_id)
         self._button(f"{label}: {'on' if on else 'off'}", flip,
                      discord.ButtonStyle.success if on else discord.ButtonStyle.secondary)
 
@@ -2319,6 +3233,10 @@ class SetupView(discord.ui.View):
         self._toggle("buffs", "Utility warnings")
         self._toggle("digest", "Weekly digest")
         self._toggle("update_notice", "Update notice")
+        self._toggle("confirm_deletes", "Confirm deletes")
+        self._toggle("show_realms", "Realms on posts")
+        self._toggle("signup_notes", "Signup notes")
+        self._toggle("spec_switch", "Spec button")
         if wd.PRESET_NAME == "retail":
             self._toggle("raiderio", "Raider.IO import")
         self._back(1)
@@ -2345,9 +3263,20 @@ async def config_show(interaction: discord.Interaction):
     lines.append(f"**Voice attendance check:** {voice_text}")
     lines.append(f"**Missing-utility warnings:** {'on' if db.setting(g, 'buffs') == '1' else 'off'}")
     lines.append(f"**Weekly attendance digest:** {'on' if db.setting(g, 'digest') == '1' else 'off'}")
+    lines.append(f"**Ask before cancel / remove:** {'on' if db.setting(g, 'confirm_deletes') == '1' else 'off'}")
+    lines.append(f"**Realms on raid posts:** {'on' if db.setting(g, 'show_realms') == '1' else 'off'}")
+    lines.append("**Signup notes:** " + {"off": "off", "officers": "on (officers, in /raid roster)",
+                                          "post": "on (also on the raid post)"}[notes_mode(g)])
+    lines.append(f"**Spec button on raid posts:** {'on' if spec_switch_on(g) else 'off'}")
+    board_ch = db.setting(g, "board_channel")
+    lines.append(f"**Upcoming raids board:** {f'<#{board_ch}>' if board_ch else 'off'}")
+    backup_ch = db.setting(g, "backup_channel")
+    lines.append(f"**Daily backup post:** {f'<#{backup_ch}>' if backup_ch else 'off'}")
     nudge = int(db.setting(g, "nudge_hours", 0))
     nudge_text = f"{plural(nudge, 'hour')} before" if nudge else "off"
     lines.append(f"**Unanswered reminder:** {nudge_text}")
+    lines.append(f"**Low-signup alert:** {lowsignup_text(g)}")
+    lines.append(f"**Discord events for raids:** {sched_text(g)}")
     log_ch = db.setting(g, "log_channel")
     lines.append(f"**Log channel:** {f'<#{log_ch}>' if log_ch else 'none'}")
     archive = int(db.setting(g, "archive_days", 0))
@@ -2443,6 +3372,89 @@ async def config_nudge(interaction: discord.Interaction, hours: app_commands.Ran
         "(Needs a ping role: `/config pingrole` or `/config channel`.)" if hours else
         "No reminders for people who haven't answered.", ephemeral=True)
 
+def lowsignup_text(g: int) -> str:
+    hours, channel = int_setting(g, "lowsignup_hours"), db.setting(g, "lowsignup_channel")
+    if not (hours and channel):
+        return "off"
+    minimum = int_setting(g, "lowsignup_min")
+    return (f"{plural(hours, 'hour')} before, in <#{channel}>" + (f", fewer than {minimum} in" if minimum else "")
+            + (", pings officers" if db.setting(g, "lowsignup_ping") == "1" else ""))
+
+
+@alerts.command(name="lowsignup", description="Tell officers when a raid is short of people, hours before it starts (0 = off)")
+@app_commands.describe(hours="How long before the start to check. 0 turns it off",
+                       channel="Where the alert goes, e.g. an officers' channel (kept from last time if left empty)",
+                       minimum="Also short with fewer than this many in (0 = only role limits; kept if left empty)",
+                       ping_officers="Mention the raid's officer role in the alert (default: no; kept from last time if left empty)")
+async def alerts_lowsignup(interaction: discord.Interaction, hours: app_commands.Range[int, 0, 168],
+                           channel: Optional[discord.TextChannel] = None,
+                           minimum: Optional[app_commands.Range[int, 0, 100]] = None,
+                           ping_officers: Optional[bool] = None):
+    g = interaction.guild_id
+    if not hours:
+        db.set_setting(g, "lowsignup_hours", 0)
+        return await interaction.response.send_message("No more low-signup alerts.", ephemeral=True)
+    target = channel or bot.get_channel(int_setting(g, "lowsignup_channel"))
+    if target is None:
+        return await interaction.response.send_message(
+            "Pick a channel for the alerts, ideally one only officers can see. Nothing was changed.", ephemeral=True)
+    mine = target.permissions_for(target.guild.me)
+    missing = [name for name, ok in (("View Channel", mine.view_channel), ("Send Messages", mine.send_messages)) if not ok]
+    if missing:
+        return await interaction.response.send_message(
+            f"I need {', '.join(missing)} in {target.mention} to post alerts there. Nothing was changed.",
+            ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+    db.set_setting(g, "lowsignup_hours", hours)
+    db.set_setting(g, "lowsignup_channel", target.id)
+    if minimum is not None:
+        db.set_setting(g, "lowsignup_min", minimum or None)
+    if ping_officers is not None:
+        db.set_setting(g, "lowsignup_ping", "1" if ping_officers else None)
+    minimum = int_setting(g, "lowsignup_min")
+    ping_officers = db.setting(g, "lowsignup_ping") == "1"
+    rule = (f"fewer than {minimum} people are in, or a role with a limit still has open slots" if minimum
+            else "a role with a limit (tanks, healers, DPS) still has open slots")
+    await interaction.response.send_message(
+        f"{plural(hours, 'hour')} before each raid I'll check it once, and if {rule}, say so in {target.mention}"
+        f"{' and mention its officer role' if ping_officers else ''}. Raids in a channel that some readers of "
+        f"{target.mention} can't see are never mentioned there, and a raid posted less than {plural(hours, 'hour')} "
+        "ahead isn't checked.", ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+
+def sched_text(g: int) -> str:
+    if not sched_events_on(g):
+        return "off"
+    return f"on, {plural(sched_length(g), 'hour')} long"
+
+
+@alerts.command(name="events", description="Add each raid to the server's Events list as a Discord Scheduled Event (default: off)")
+@app_commands.describe(on="True: every new or upcoming raid gets an event. False: the bot deletes the events it made",
+                       length="How many hours each event lasts (default 3; kept from last time if left empty)")
+async def alerts_events(interaction: discord.Interaction, on: bool,
+                        length: Optional[app_commands.Range[int, 1, 12]] = None):
+    g = interaction.guild_id
+    if not on:
+        db.set_setting(g, "sched_events", None)
+        made = db.sched_events_of(g)
+        await interaction.response.send_message(
+            "Raids won't get Discord events any more." + (f" I'm deleting the {plural(len(made), 'event')} I made."
+                                                          if made else ""), ephemeral=True)
+        for event in made:  # the reply comes first: deleting many events can take longer than Discord waits
+            sched_soon(event["id"])
+        return
+    db.set_setting(g, "sched_events", "1")
+    if length is not None:
+        db.set_setting(g, "sched_events_hours", length)
+    hours = sched_length(g)
+    lacking = "" if sched_can_manage(interaction.guild) else (
+        "\n⚠️ I don't have the **Manage Events** permission yet, so nothing will appear until a server admin gives it "
+        "to my role (Server Settings → Roles). Everything else keeps working without it.")
+    await interaction.response.send_message(
+        f"Every upcoming raid will appear in the server's **Events** list within a minute, as a {plural(hours, 'hour')} "
+        "event linking to its post, and follows the raid when it's edited, cancelled, restored or starts. Members can press "
+        "**Interested** there to get Discord's own reminder. Only raids in a channel that everyone in the server can see "
+        "get an event, because every member can see the Events list." + lacking, ephemeral=True)
+
 
 @config.command(name="raiderrole", description="Only members with this role can sign up (leave empty: anyone can)")
 @app_commands.describe(role="Officers can always sign people up with /raid add, whatever this is set to")
@@ -2531,6 +3543,61 @@ async def config_raiderio(interaction: discord.Interaction, on: bool, region: Op
         "(nothing else, no accounts)." + shown if on else "`/character import` is off.", ephemeral=True)
 
 
+@config.command(name="confirm", description="Ask \"are you sure?\" before /raid cancel and /raid remove (off by default)")
+@app_commands.describe(on="True = officers get a private Yes / No question first")
+async def config_confirm(interaction: discord.Interaction, on: bool):
+    db.set_setting(interaction.guild_id, "confirm_deletes", "1" if on else "0")
+    await interaction.response.send_message(
+        "`/raid cancel` and `/raid remove` will ask first." if on else
+        "`/raid cancel` and `/raid remove` act straight away. A cancelled raid can still be brought back with "
+        f"`/raid restore` for {KEEP_CANCELLED_DAYS} days.", ephemeral=True)
+
+
+@config.command(name="realms", description="Show each character's realm after the name on raid posts (off by default)")
+@app_commands.describe(on="True = e.g. Thrall (Area 52), for characters whose player saved a realm")
+async def config_realms(interaction: discord.Interaction, on: bool):
+    db.set_setting(interaction.guild_id, "show_realms", "1" if on else "0")
+    for upcoming in db.upcoming_events(interaction.guild_id, int(time.time()))[:25]:  # redraw the open posts now
+        if upcoming["message_id"]:
+            await refresh_message(upcoming["id"])
+    await interaction.response.send_message(
+        "Raid posts now show the realm after a character's name, when its player saved one (`/character realm`)."
+        if on else "Raid posts show character names only. Players' saved realms are kept.", ephemeral=True)
+
+
+@config.command(name="notes", description="Let players add a short note to their signup with /note (off by default)")
+@app_commands.describe(on="True = players can use /note, e.g. 'late 15 min'. Officers see notes in /raid roster",
+                       onpost="True = also show the notes on the raid post, for everyone (default: officers only)")
+async def config_notes(interaction: discord.Interaction, on: bool, onpost: bool = False):
+    g = interaction.guild_id
+    db.set_setting(g, "signup_notes", "1" if on else "0")
+    db.set_setting(g, "notes_on_post", "1" if on and onpost else "0")
+    for upcoming in db.upcoming_events(g, int(time.time()))[:25]:  # redraw the open posts now
+        if upcoming["message_id"]:
+            await refresh_message(upcoming["id"])
+    if not on:
+        text = "Signup notes are off: `/note` is turned off and notes are hidden. Notes already written are kept."
+    elif onpost:
+        text = (f"Players can add a note of up to {NOTE_MAX} characters to their signup with `/note`. "
+                "It shows on the raid post after their name, and in `/raid roster`.")
+    else:
+        text = (f"Players can add a note of up to {NOTE_MAX} characters to their signup with `/note`. "
+                "Officers see the notes in `/raid roster`; the raid post doesn't show them (`onpost: True` would).")
+    await interaction.response.send_message(text, ephemeral=True)
+
+
+@config.command(name="specswitch", description="Put a Spec button on raid posts to switch spec without signing up again (off by default)")
+@app_commands.describe(on="True = players who signed up can pick another spec of the same character from the post")
+async def config_specswitch(interaction: discord.Interaction, on: bool):
+    g = interaction.guild_id
+    db.set_setting(g, "spec_switch", "1" if on else "0")
+    await redraw_open_posts(g)  # add or take away the button on the open posts now
+    await interaction.response.send_message(
+        "Raid posts now have a **🔄 Spec** button. A signed-up player picks another spec of the same class; their "
+        "character, status and note stay, and role limits are checked again." if on else
+        "The Spec button is gone from raid posts. Players change spec by pressing **Sign Up** again.", ephemeral=True)
+
+
 @config.command(name="updatenotice", description="Say in the log channel when a newer version of the bot is released (off by default)")
 @app_commands.describe(on="True = check GitHub about once a day. It sends no information about your server")
 async def config_updatenotice(interaction: discord.Interaction, on: bool):
@@ -2556,21 +3623,88 @@ async def config_logchannel(interaction: discord.Interaction, channel: Optional[
         ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
 
-@config.command(name="backup", description="Get a copy of the bot's database (only you see it)")
+@config.command(name="backup", description="Get a copy of this server's data (only you see it)")
 async def config_backup(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     with tempfile.TemporaryDirectory() as folder:
         path = Path(folder) / f"raidbot-{datetime.now():%Y-%m-%d-%H%M}.db"
-        db.snapshot_to(path)
+        db.snapshot_for_guild(path, interaction.guild_id)  # never another server's raids, players or settings
         size = path.stat().st_size
         if size > 8 * 1024 * 1024:
             return await interaction.followup.send(
-                f"The database is {size // 1024 // 1024} MB, too big to attach. Daily copies are in the `backups` "
+                f"This server's data is {size // 1024 // 1024} MB, too big to attach. Daily copies are in the `backups` "
                 "folder next to the bot.", ephemeral=True)
         await interaction.followup.send(
-            "Here is a copy of the database (characters, raids, signups, settings). It contains your members' "
-            "Discord IDs, so keep it private. To restore it, stop the bot and replace `raidbot.db` with this file.",
+            "Here is a copy of this server's data (raids, signups, characters, settings). It contains your members' "
+            "Discord IDs, so keep it private. To restore it, stop the bot and replace `raidbot.db` with this file "
+            "(it only holds this server's data, so if the bot runs in other servers too, use the `backups` folder instead).",
             file=discord.File(io.BytesIO(path.read_bytes()), filename=path.name), ephemeral=True)
+
+
+@config.command(name="backupchannel", description="Post a copy of this server's data in a private admin channel every day (off by default)")
+@app_commands.describe(channel="A channel only admins can see. Leave empty to turn it off")
+async def config_backupchannel(interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None):
+    g = interaction.guild_id
+    if channel is None:
+        db.set_setting(g, "backup_channel", None)
+        return await interaction.response.send_message(
+            "No more daily backup posts. Copies already posted stay until you delete them, and the bot still keeps "
+            "7 daily copies in its `backups` folder.", ephemeral=True)
+    problem = backup_channel_problem(channel)
+    if problem:
+        return await interaction.response.send_message(problem + " Nothing was changed.", ephemeral=True,
+                                                       allowed_mentions=discord.AllowedMentions.none())
+    db.set_setting(g, "backup_channel", channel.id)
+    db.set_setting(g, "backup_post_last", None)  # so the first copy goes out within a minute
+    await interaction.response.send_message(
+        f"Every day after {BACKUP_POST_HOUR:02d}:00 (server time) I'll post a copy of this server's data in "
+        f"{channel.mention}, starting within a minute; the newest {BACKUP_POSTS_KEPT} are kept. Anyone who can read that "
+        "channel can download your members' Discord IDs, so keep it to admins.", ephemeral=True,
+        allowed_mentions=discord.AllowedMentions.none())
+
+
+@config.command(name="board", description="A pinned Upcoming raids message in a channel, kept up to date (off by default)")
+@app_commands.describe(channel="Where the board goes, ideally a quiet channel. Leave empty to turn it off")
+async def config_board(interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None):
+    g = interaction.guild_id
+    if channel is None:
+        await remove_board(g)
+        db.set_setting(g, "board_channel", None)
+        return await interaction.response.send_message("The Upcoming raids board is off and its message is deleted.",
+                                                       ephemeral=True)
+    mine = channel.permissions_for(channel.guild.me)
+    missing = [name for name, ok in (("View Channel", mine.view_channel), ("Send Messages", mine.send_messages),
+                                     ("Embed Links", mine.embed_links)) if not ok]
+    if missing:
+        return await interaction.response.send_message(
+            f"I need {', '.join(missing)} in {channel.mention} to keep the board there. Nothing was changed.",
+            ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+    await remove_board(g)  # moving it, or running this again to bring back a board deleted by hand
+    db.set_setting(g, "board_channel", channel.id)
+    now = int(time.time())
+    embed = board_embed(g, channel, now)
+    try:
+        msg = await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+    except discord.HTTPException:
+        db.set_setting(g, "board_channel", None)
+        return await interaction.response.send_message(
+            f"I couldn't post in {channel.mention}, so the board is still off. Check my permissions there.", ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none())
+    db.set_setting(g, "board_message", msg.id)
+    _board_drawn[g] = (msg.id, embed.description)
+    pinned = await pin_board(msg)
+    notes = []
+    if not pinned:
+        notes.append("I couldn't pin it: give me Manage Messages there, or pin it yourself.")
+    _, hidden = board_raids(g, channel, now)
+    if hidden:
+        notes.append(f"{plural(hidden, 'upcoming raid')} {'is' if hidden == 1 else 'are'} left off because some people "
+                     f"who can read {channel.mention} can't see {'its' if hidden == 1 else 'their'} channel.")
+    await interaction.response.send_message(
+        f"The Upcoming raids board is up in {channel.mention}{' and pinned' if pinned else ''}. It changes by itself when "
+        "raids are posted, edited, cancelled or start, and when people sign up. Raids only appear if everyone who can "
+        "read that channel can see the raid's channel." + "".join(f"\n{n}" for n in notes), ephemeral=True,
+        allowed_mentions=discord.AllowedMentions.none())
 
 
 @config.command(name="timezone", description="Timezone used when typing raid dates")
@@ -2617,29 +3751,32 @@ async def help_command(interaction: discord.Interaction):
         "On a raid post press **Sign Up** and pick a character or class and spec. "
         "**Late / Tentative / Bench / Absent** change your status.\n"
         "`/character add` save a character (do this once, then sign up in one click)\n"
-        "`/character list` · `/character main` · `/character remove`\n"
+        "`/character list` · `/character main` · `/character realm` · `/character remove`\n"
         "`/remindme` get reminders as a private message · `/always join` stay signed up to a repeating raid\n"
+        "`/note` add a short note to your signup, e.g. late 15 min (if your admin turned it on)\n"
+        "`/forgetme` delete your characters and signup history from the bot\n"
         "`/character import` look a retail character up on Raider.IO (if your admin turned it on)\n"
         "The **Calendar** button on a raid post gives you a file for your calendar app."))
     embed.add_field(name="Officers", inline=False, value=(
         "`/raid create` post a raid (optionally ping a role)\n"
         "`/raid edit` change title, time, description or limits\n"
-        "`/raid roster` copy-friendly list of who is coming\n"
+        "`/raid roster` copy-friendly list of who is coming (`invites: True` for /invite lines)\n"
         "`/raid copy` same raid, new date · `/raid repeat` weekly or every 2 weeks\n"
         "`/raid template save|list|delete` saved setups, then `/raid create template:`\n"
         "`/raid noshow` mark someone who didn't turn up · `/stats team` everyone's attendance · `/stats export` as a spreadsheet\n"
         "`/raid list` upcoming raids with counts · `/raid add` sign someone up or change their status\n"
-        "`/raid close` · `/raid cancel` · `/raid remove` · `/raid unsigned`"))
+        "`/raid promote` move a benched player in, ahead of the line\n"
+        "`/raid close` · `/raid cancel` (undo: `/raid restore`) · `/raid remove` · `/raid unsigned`"))
     embed.add_field(name="Admins", inline=False, value=(
         "`/config show` · `/config timezone` · `/config reminder`\n"
         "`/config officer` who can manage every raid · `/config pingrole` default role to ping\n"
         "`/config channel` per-channel (or category) ping role and raid leaders\n"
         "`/config threads` discussion thread per raid · `/config archive` delete old posts\n"
-        "`/config nudge` ping people who haven't answered · `/config logchannel` activity log\n"
+        "`/config nudge` ping people who haven't answered · `/alerts lowsignup` tell officers a raid is short · `/alerts events` Discord events · `/config logchannel` activity log\n"
         "`/config raiderrole` only that role can sign up · `/config autoclose` close sign-ups before the start\n"
         "`/config voicechannel` automatic no-shows from a voice channel · `/config buffs` warn about missing Bloodlust / battle res\n"
-        "`/config digest` weekly attendance summary. Officers can also limit classes: `/raid create classes: Mage 4`\n"
-        "`/config setup` guided panel for the main settings · `/config raiderio` · `/config updatenotice`\n"
+        "`/config digest` weekly attendance summary. Officers can limit classes: `/raid create classes: Mage 4`\n"
+        "`/config setup` guided panel for the main settings · `/config raiderio` · `/config updatenotice` · `/config confirm` · `/config realms` · `/config notes`\n"
         "`/config backup` get a copy of the database · `/status` bot health check"))
     embed.set_footer(text="Anyone on the bench is moved in automatically when a slot opens.")
     await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -2697,12 +3834,14 @@ async def load_class_emojis() -> None:
 @bot.event
 async def setup_hook():
     await load_class_emojis()
-    bot.add_view(RaidView())  # keeps old raid posts working after a restart
+    bot.add_view(RaidView(spec_button=True))  # keeps old raid posts working after a restart (with every button, so a
+    # post that shows the Spec button is answered even if it was drawn before a restart)
     bot.tree.add_command(character)
     bot.tree.add_command(raid)
     bot.tree.add_command(config)
     bot.tree.add_command(stats)
     bot.tree.add_command(always)
+    bot.tree.add_command(alerts)
     if GUILD_ID:  # guild sync is instant; global sync can take up to an hour
         guild = discord.Object(id=GUILD_ID)
         bot.tree.copy_global_to(guild=guild)

@@ -121,6 +121,7 @@ class FakeResp:
     def __init__(self): self.sent = []; self.deferred = False
     async def send_message(self, *a, **k): self.sent.append((a, k))
     async def defer(self, **k): self.deferred = True
+    async def edit_message(self, **k): self.sent.append(((k.get('content'),), k))
     def is_done(self): return bool(self.sent) or self.deferred
 
 
@@ -149,6 +150,7 @@ def inter(user, ch=None, **wire_kw):
     fu.send = fsend
     return types.SimpleNamespace(user=user, guild_id=G, guild=GUILD, channel=ch, channel_id=ch.id,
                                  response=FakeResp(), followup=fu, sent=sent, command=None)
+
 
 
 admin = member(admin=True)

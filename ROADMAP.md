@@ -7,28 +7,28 @@ Shipped versions are listed in [CHANGELOG.md](CHANGELOG.md). Ideas below are ope
 
 ## Planned, in build order
 
-Everything below is optional and off by default unless noted. One release (v1.14.0) will roll up both batches.
+Everything below is optional and off by default unless noted. Items 1-13 shipped together in v1.13.0; item 14 comes later.
 
 ### v1.13 "safety net"
 | # | Feature | Why | Effort | Status |
 |---|---|---|---|---|
 | 1 | More WoW presets: Season of Discovery, TBC, Wrath, Cataclysm, Mists, WoW: Forever | Only data in `wow_data.py` | S | Done (on the v1.13 branch) |
 | 2 | Release automation (tag builds, scans and attaches the zip) and Dependabot | One-click releases, free security upkeep | M | Done (on the v1.13 branch) |
-| 3 | Confirm before `/raid cancel` and `/raid remove`, plus undo for cancel (`/raid restore`, 14 days) | One mistyped ID currently deletes a raid and its signups for good | S-M | Planned |
-| 4 | `/forgetme`: a player deletes their own characters and signup history | Privacy, nearly free | S | Planned |
-| 5 | Daily backup sent to a private admin channel (`/config backupchannel`) | Backups sit on the same PC as the bot | M | Planned |
+| 3 | Optional confirm before `/raid cancel` and `/raid remove` (`/config confirm`), plus undo for cancel (`/raid restore`, 14 days) | One mistyped ID currently deletes a raid and its signups for good | S-M | Done (on the v1.13 branch) |
+| 4 | `/forgetme`: a player deletes their own characters and signup history | Privacy, nearly free | S | Done (on the v1.13 branch) |
+| 5 | Daily backup sent to a private admin channel (`/config backupchannel`) | Backups sit on the same PC as the bot | M | Done (on the v1.13 branch) |
 
 ### v1.14 "convenience"
 | # | Feature | Why | Effort | Status |
 |---|---|---|---|---|
-| 6 | Realm stored with characters (Raider.IO import fills it) | Needed for invite names | M | Planned |
-| 7 | Short note on a signup, shown on the post and roster | Very common request | S | Planned |
-| 8 | Switch spec from the post without redoing signup | Respeccing is routine | M | Planned |
-| 9 | `/raid promote`: pull a specific benched player in | Bench promotion is strictly first-come today | S | Planned |
-| 10 | `/raid roster` outputs ready-to-paste in-game invite names (`Name-Realm`) | What officers use right before a pull | M | Planned |
-| 11 | Pinned "Upcoming raids" board that edits itself | One place to see the week | S-M | Planned |
-| 12 | Low-signup alert to officers (e.g. 15/25 a day before) | Catches a failing raid early | S | Planned |
-| 13 | Native Discord Scheduled Event with each raid | Shows in the Events tab and phone calendar | M | Planned |
+| 6 | Realm stored with characters (Raider.IO import fills it), optional on raid posts (`/config realms`) | Needed for invite names | M | Done (on the v1.13 branch) |
+| 7 | Short note on a signup (`/note`), shown in the roster and optionally on the post (`/config notes`) | Very common request | S | Done (on the v1.13 branch) |
+| 8 | Switch spec from the post without redoing signup | Respeccing is routine | M | Done (on the v1.13 branch, `/config specswitch`) |
+| 9 | `/raid promote`: pull a specific benched player in | Bench promotion is strictly first-come today | S | Done (on the v1.13 branch) |
+| 10 | `/raid roster` outputs ready-to-paste in-game invite names (`Name-Realm`) | What officers use right before a pull | M | Done (on the v1.13 branch, `/raid roster invites: True`) |
+| 11 | Pinned "Upcoming raids" board that edits itself | One place to see the week | S-M | Done (on the v1.13 branch, `/config board`) |
+| 12 | Low-signup alert to officers (e.g. 15/25 a day before) | Catches a failing raid early | S | Done (on the v1.13 branch, `/alerts lowsignup`) |
+| 13 | Native Discord Scheduled Event with each raid | Shows in the Events tab and phone calendar | M | Done (on the v1.13 branch, `/alerts events`) |
 | 14 | Docker image and a Raspberry Pi guide | Runs 24/7 without a Windows PC | M | Planned |
 
 ## Other ideas

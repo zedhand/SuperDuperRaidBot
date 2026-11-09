@@ -114,10 +114,11 @@ print("version comparison")
 check("'v1.12.0' is read as numbers", B.parse_version("v1.12.0") == (1, 12, 0, 0) and B.parse_version("1.12") == (1, 12, 0, 0))
 check("beta tags, junk and nothing are not versions", all(B.parse_version(x) is None for x in ("v1.12.0-beta", "latest", "", None, "v1..2", "1.2.3.4.5")))
 check("1.10 is newer than 1.9 (numbers, not text)", B.parse_version("1.10.0") > B.parse_version("1.9.0"))
-check("this version is 1.12.0", B.VERSION == "1.12.0")
+real_version, B.VERSION = B.VERSION, "1.12.0"  # compare against a fixed version so later releases don't break this
 for tag, want in (("v1.12.1", True), ("v1.12.0", False), ("v1.11.9", False), ("v1.13.0", True), ("v2.0", True),
                   ("1.12.0-rc1", False), ("nightly", False), (None, False), ("v1.12", False)):
     check(f"{tag!r} newer than {B.VERSION}: {want}", B.release_is_newer(tag) is want)
+B.VERSION = real_version
 
 # ------------------------------------------------------------ the outside-lookup helper
 print("http_get_json fails safely")
@@ -199,7 +200,7 @@ def lookup(payload):
 
 
 got = lookup(SAMPLE)
-check("class, spec, item level and link come back", got == {"name": "Thrall", "class": "Shaman", "spec": "Enhancement", "ilvl": 639,
+check("class, spec, item level and link come back", got == {"name": "Thrall", "class": "Shaman", "spec": "Enhancement", "realm": "", "ilvl": 639,
                                                             "url": "https://raider.io/characters/us/area-52/Thrall"}, got)
 check("a spec we don't know gives spec None (we ask the player)", lookup({**SAMPLE, "active_spec_name": "Banana"})["spec"] is None)
 check("a link to some other site is dropped", lookup({**SAMPLE, "profile_url": "https://evil.example/x"})["url"] is None)
@@ -510,7 +511,7 @@ press(view, "Back")
 print("/config setup: extras")
 press(view, "Extras")
 toggles = [c.label for c in view.children]
-check("five switches and Back on retail", len(toggles) == 6 and toggles[-1] == "Back" and "Raider.IO import: " in " ".join(toggles), toggles)
+check("nine switches and Back on retail (Confirm deletes, Realms on posts, Signup notes and Spec button since v1.13)", len(toggles) == 10 and toggles[-1] == "Back" and "Raider.IO import: " in " ".join(toggles) and "Confirm deletes: off" in toggles and "Realms on posts: off" in toggles and "Signup notes: off" in toggles and "Spec button: off" in toggles, toggles)
 before = db.setting(G, "threads")
 press(view, "Discussion threads: off")
 check("a switch flips the setting", db.setting(G, "threads") == "1")

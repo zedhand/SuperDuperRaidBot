@@ -13,7 +13,7 @@ os.chdir(proj)
 sys.path.insert(0, str(proj))
 import bot as B
 
-for group in (B.character, B.raid, B.config, B.stats):
+for group in (B.character, B.raid, B.config, B.stats, B.alerts):
     B.bot.tree.add_command(group)
 
 problems = []
@@ -43,11 +43,15 @@ def walk(d, path="", depth=0):
             problems.append(f"too many choices: {path}{name} {o['name']}")
 
 
+for group in (B.character, B.raid, B.config, B.stats, B.alerts):
+    if len(group.commands) > 25:  # Discord refuses the whole sync past 25 (discord.py raises while loading)
+        problems.append(f"/{group.name} has {len(group.commands)} subcommands, the limit is 25")
+
 commands = B.bot.tree.get_commands()
 for c in commands:
     walk(c.to_dict(B.bot.tree))
 top = {c.name for c in commands}
-expected = {"help", "character", "raid", "config", "stats", "myraids", "status"}
+expected = {"help", "character", "raid", "config", "stats", "myraids", "status", "alerts"}
 if not expected <= top:
     problems.append(f"missing commands: {expected - top}")
 print(f"{len(commands)} top-level commands checked, {len(problems)} problems")

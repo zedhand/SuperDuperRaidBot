@@ -222,7 +222,7 @@ Times are in the timezone chosen during setup (change it any time with `/config 
 sees the time in **their own** timezone with a live countdown.
 
 ### Signing up (players)
-1. **Once:** save your characters with `/character add` (name, class, spec). Pick one as your **main** with `/character main`.
+1. **Once:** save your characters with `/character add` (name, class, spec, and optionally the realm). Pick one as your **main** with `/character main`.
 2. On a raid post click **Sign Up**. If you've signed up before, the top button is **⚡ Sign up as (your last character)**:
    one click and you're in. (Your main is used the very first time.) Or choose a different saved character (your main is
    marked ⭐), **or** pick a class and spec on the spot if you haven't saved one.
@@ -235,7 +235,14 @@ sees the time in **their own** timezone with a live countdown.
 | **Tentative** | Maybe. Not counted yet. |
 | **Bench** | Happy to fill in if there's room. |
 | **Absent** | You can't make it. |
+| **🔄 Spec** | Only if an admin turned it on (`/config specswitch`). Switch to another spec of the character you signed up with, e.g. from Fire to Frost, or from Protection to Fury. |
 | **📅 Calendar** | Gives you a file (`.ics`) to add the raid to Google, Apple or Outlook calendar. Opening it again after the raid moves updates the entry. |
+
+**Switching spec (optional, `/config specswitch`).** With the switch on, raid posts get a **🔄 Spec** button. Press it and pick
+another spec of the class you signed up with: your character, status and note stay as they are. If the new spec has a different
+role (say you go from healer to dps), the role limits are checked again, so you may be put on the bench when that role is full,
+or move in when you were waiting for a slot. Your saved characters aren't changed. To switch to a different character, press
+**Sign Up** again.
 
 Late / Tentative / Bench / Absent reuse the character you signed up with (or your main). If you've never signed up and have
 no saved character, the bot asks you to press **Sign Up** first.
@@ -261,6 +268,7 @@ on any single date. `/always list` shows what you're in, and `/always leave` sto
 - **Recurring raids.** With `repeat` set, the next one is posted when the current one starts.
 - **Automatic no-shows (optional).** With a voice channel set (`/config voicechannel`), 15 minutes after a raid starts the bot looks at who is in that channel. Anyone signed up as **in** who isn't there is marked as a no-show, so officers don't have to do it by hand, and the result is written to the log channel. If **nobody** is in the channel the check is skipped (the raid is probably being run somewhere else), people marked **late** are never checked, and a mistake is one `/raid noshow` (undo) away. It only looks at raids that started in the last 6 hours, so turning it on never rewrites old attendance.
 - **Class limits (optional).** `/raid create classes: Mage 4, Warlock 2` limits how many of a class can be in. Extra people go on the bench and move in when a spot opens, like role limits. The limits show in the post's footer and are kept by templates, copies and repeating raids. `/raid edit classes: off` removes them.
+- **Signup notes (optional, `/config notes`).** A player types `/note` and picks a raid they signed up for to add a short note, e.g. `late 15 min` or `can swap to heals` (up to 60 characters; leave the text out to clear it). The note stays when they change status or character. Officers see notes in `/raid roster`, and with `onpost: True` they also show in italics after the name on the raid post. Formatting, mentions and links are taken out, so a note can't ping anyone or break the post.
 - **Missing utility warning (optional, `/config buffs`).** Once 8 or more people are in and none of them can provide it, the post says `No Bloodlust yet (Shaman, Mage, Evoker, Hunter)` or `No a battle res yet (...)`. The lists are in `wow_data.py` and are short on purpose; Classic Era, Season of Discovery and WoW: Forever have no Bloodlust.
 - **New-version notice (optional, `/config updatenotice`).** About once a day the bot asks GitHub for the newest release and says so **once per version** in the log channel, with a link. GitHub only sees a request from your computer; nothing about your server is sent. `/status` then also shows the latest version.
 - **Weekly digest (optional, `/config digest`).** Every Monday after 09:00 (server time) a summary of the last 7 days is posted in the log channel: raids, attended, no-shows, who had the most no-shows.
@@ -271,8 +279,11 @@ on any single date. `/always list` shows what you're in, and `/always leave` sto
 | Who | Command | What it does |
 |---|---|---|
 | Everyone | `/character add / list / main / remove` | Manage your saved characters |
+| Everyone | `/character realm` | Set or clear the realm of a saved character (optional; `/character add realm:` works too) |
 | Everyone | `/myraids` | The upcoming raids you've answered, with links |
+| Everyone | `/note` | Add a short note to your signup, e.g. `late 15 min` (leave the text out to clear it). Only if an admin turned it on |
 | Everyone | `/remindme` | Get raid reminders as a private message instead of a channel ping |
+| Everyone | `/forgetme` | Delete your characters and signup history from the bot (asks first, can't be undone) |
 | Everyone | `/character import` | Look a **retail** character up on Raider.IO and save it (only if an admin turned it on) |
 | Everyone | `/always join / leave / list` | Stay signed up to a repeating raid automatically |
 | Everyone | `/stats me` | Your own attendance (last 90 days) |
@@ -280,14 +291,16 @@ on any single date. `/always list` shows what you're in, and `/always leave` sto
 | Officers | `/raid create` | Post a raid (options: title, template, description, tanks, healers, dps, classes, ping, repeat, thread) |
 | Officers | `/raid list` | Your upcoming raids with sign-up counts, times and links |
 | Officers | `/raid add` | Sign someone up, or change their status or character (works even if sign-ups are closed) |
+| Officers | `/raid promote` | Move a specific benched player into the raid, ahead of the line. Refuses if their role or class is full unless you add `over_limit: True` |
 | Officers | `/raid edit` | Change title, date, time, description or limits. If the time changes, signed-up people are told |
 | Officers | `/raid copy` | The same raid on a new date (same limits and description, no signups) |
 | Officers | `/raid repeat` | Repeat weekly or every 2 weeks, or stop repeating |
 | Officers | `/raid template save / list / delete` | Saved setups; use one with `/raid create template:` |
-| Officers | `/raid roster` | A private, copy-friendly list of who's coming |
+| Officers | `/raid roster` | A private, copy-friendly list of who's coming. Add `invites: True` for `/invite Name-Realm` lines to paste into WoW |
 | Officers | `/raid noshow` | Mark someone who signed up but didn't turn up (add `undo: True` to take it back) |
 | Officers | `/raid close` | Close signups (run it again to reopen) |
-| Officers | `/raid cancel` | Delete a raid and its post (and thread) |
+| Officers | `/raid cancel` | Delete a raid and its post (and thread). `/raid restore` undoes it |
+| Officers | `/raid restore` | Bring back a raid cancelled in the last 14 days, with all its signups, as a new post |
 | Officers | `/raid remove` | Remove someone's signup |
 | Officers | `/raid unsigned` | List (or ping) members of a role who haven't answered |
 | Officers | `/stats team` | Everyone's attendance |
@@ -297,6 +310,10 @@ on any single date. `/always list` shows what you're in, and `/always leave` sto
 | Admins | `/config channel` | Per-channel (or per-category) ping role and raid-leader role |
 | Admins | `/config threads / archive / nudge / logchannel` | Optional extras. All are **off** until you turn them on |
 | Admins | `/config raiderrole` | Only members with this role can sign up (default: anyone) |
+| Admins | `/config realms` | Show each character's realm after the name on raid posts, e.g. `Thrall (Area 52)` (default: off) |
+| Admins | `/config specswitch` | Put a **🔄 Spec** button on raid posts so a signed-up player can switch spec without signing up again (default: off) |
+| Admins | `/config notes` | Let players add a note to their signup with `/note`. Officers see notes in `/raid roster`; `onpost: True` also shows them on the raid post (default: off) |
+| Admins | `/config confirm` | Ask "are you sure?" before `/raid cancel` and `/raid remove` (default: off) |
 | Admins | `/config autoclose` | Close sign-ups a set number of hours before a raid (default: off) |
 | Admins | `/config voicechannel` | Mark no-shows automatically from a voice channel (default: off). `/config channel voice:` sets one per raid team |
 | Admins | `/config buffs` | Warn on the post when nobody can provide Bloodlust or a battle res (default: off) |
@@ -304,7 +321,11 @@ on any single date. `/always list` shows what you're in, and `/always leave` sto
 | Admins | `/config setup` | A guided private panel for the main settings: roles, channels, timing and the optional extras |
 | Admins | `/config raiderio` | Allow `/character import` (retail only, default: off) and set a default region and realm |
 | Admins | `/config updatenotice` | Say in the log channel when a newer version is released (default: off) |
-| Admins | `/config backup` | Sends you a private copy of the database as a file |
+| Admins | `/config backup` | Sends you a private copy of this server's data as a file |
+| Admins | `/config board` | A pinned **Upcoming raids** message in a channel you pick, with each raid's time, signups per role and a link to its post. It updates by itself (default: off) |
+| Admins | `/alerts lowsignup` | Tell officers in a channel you pick when a raid is short of people a set number of hours before it starts (default: off) |
+| Admins | `/alerts events` | Put each raid in the server's **Events** list as a Discord Scheduled Event that follows the raid (default: off, needs **Manage Events**) |
+| Admins | `/config backupchannel` | Post a copy of this server's data in a private admin channel every day, so a backup lives off the bot's PC (default: off) |
 | Admins | `/status` | Health check: version, uptime, channel permissions, last backup, last problem |
 
 **Extras explained**
@@ -314,6 +335,29 @@ on any single date. `/always list` shows what you're in, and `/always leave` sto
 - `/config raiderrole` limits sign-ups to one role. Officers are always allowed, and can sign people up with `/raid add`.
 - `/config autoclose` closes sign-ups that many hours before the start. Reopen a raid any time with `/raid close`.
 - `/config voicechannel`, `/config buffs` and `/config digest` switch on the optional extras described under *What the bot does by itself*.
+- `/config board` posts one **📅 Upcoming raids** message in the channel you choose and pins it. It lists the next 15 raids
+  with their time (in each reader's own time zone), how many are in per role, and a link to the post, and it edits itself
+  when a raid is posted, edited, cancelled or restored, when people sign up, and when a raid starts (it drops off). A quiet
+  channel such as `#raid-schedule` works best. A raid is only listed if everyone who can read the board can also see the
+  raid's channel, so officer-only or team-only raids stay hidden on a public board. Run it again to move the board or to bring
+  it back if someone deleted it, and leave the channel empty to turn it off. Pinning needs **Manage Messages**; without it the
+  board still works, unpinned.
+- `/alerts lowsignup hours channel` checks each raid once, that many hours before it starts, and if a role with a limit
+  still has open slots (or, with `minimum`, fewer than that many people are in) it posts one line in the channel you pick,
+  e.g. *⚠️ Low signups: Karazhan starts in 4 hours and is short: 1 healer slot open (4/5)*. A raid with enough people gets
+  no message. Add `ping_officers: True` to mention the raid's officer role (the `/config channel` raid leaders, else
+  `/config officer`). An officers-only channel works best: a raid is only mentioned if everyone who can read the alert
+  channel can also see the raid's channel, so a private raid is never announced somewhere more public. A raid posted, or
+  moved, to less than that many hours ahead isn't checked. `/alerts lowsignup 0` turns it off. (It lives under `/alerts`
+  because Discord allows at most 25 commands under `/config`.)
+- `/alerts events on: True` gives every upcoming raid a Discord **Scheduled Event**, so it shows in the server's Events
+  list and members can press **Interested** to get Discord's own reminder on their phone. The event has the raid's title,
+  time and description, and links to the post (sign-ups still happen on the post). It is updated when the raid is edited,
+  deleted when it's cancelled, made again when it's restored, started when the raid starts and ended after `length` hours
+  (default 3). Every member can see the Events list, so only raids in a channel that everyone in the server can see get
+  an event: officer-only or team-only raids never do. The bot needs the **Manage Events** permission; without it nothing
+  is created and everything else works as before. An event deleted by hand isn't made again. `/alerts events on: False`
+  deletes the events the bot made.
 - `/config logchannel` posts a one-line note whenever a raid is created, edited, cancelled, closed or someone is marked a no-show.
 
 ### Who can do what
@@ -368,6 +412,12 @@ its own bot token) for a second server.
 squares. To use icons, put images named after each class in the `icons` folder (see `icons/README.txt`).
 
 **Can I get the raid in my phone's calendar?** Yes: press the **📅 Calendar** button on the raid post and open the file it sends you. Raids have no end time, so the calendar shows 3 hours.
+
+**I cancelled the wrong raid. Can I get it back?** Yes, for 14 days. `/raid restore` lists this server's recently cancelled raids; pick one and it is posted again in its channel with everyone's signups. After 14 days the copy is deleted for good.
+
+**How do I invite everyone in game without typing each name?** Run `/raid roster invites: True`. It gives you one `/invite` line per player who is in or late, with the realm (`Thrall-Area52`) for anyone whose saved character has one, so players from other realms work too. Paste a line into WoW chat, or each block into its own macro: the lines are grouped so a block fits in one macro (255 characters). Players on the bench, tentative or marked as a no-show aren't listed.
+
+**Someone is on the bench but we want them in tonight. Can we skip the line?** Yes. `/raid promote` moves that player in straight away and tells them. If their role or class is already full it asks you to free a slot first, or to add `over_limit: True` to take them in anyway.
 
 **A player made a mistake. Can an officer fix their signup?** Yes. Use `/raid remove` to clear it, or `/raid add` to set their status, character or spec for them.
 
@@ -466,7 +516,19 @@ Everything lives in `raidbot.db` (SQLite) next to the bot: characters, raids and
 your machine except what Discord itself receives (the posts and messages the bot sends). The bot does not read your server's
 chat messages.
 
-Admins can get a copy of the database any time with `/config backup` (it contains your members' Discord IDs, so keep it private). If `raidbot.db` is ever damaged, the bot restores the newest healthy daily backup on the next start, keeps the damaged file as `raidbot.db.damaged-<time>`, and `/status` tells you it happened. If there is no healthy backup it stops and explains, leaving the file untouched. Errors are also written to `raidbot.log` (the newest 5 MB are kept).
+Any player can type `/forgetme` to delete what the bot stores about them, in every server it's in: their characters, their
+signups (and so their attendance history), their `/always` sign-ups, their `/remindme` setting and their place in raids
+kept for `/raid restore`. The bot asks first, then takes their name off the raid posts. Raids they created stay. The daily
+backups still hold the old data until they're replaced (within 7 days), as does any copy an admin made with `/config backup`.
+
+Admins can get a copy of their server's data any time with `/config backup` (it contains your members' Discord IDs, so keep it private; like the daily backup post, it holds no other server's raids, players or settings). If `raidbot.db` is ever damaged, the bot restores the newest healthy daily backup on the next start, keeps the damaged file as `raidbot.db.damaged-<time>`, and `/status` tells you it happened. If there is no healthy backup it stops and explains, leaving the file untouched. Errors are also written to `raidbot.log` (the newest 5 MB are kept).
+
+To keep a backup somewhere other than the bot's PC, `/config backupchannel` picks a channel where the bot posts a copy every
+day after 04:00 (server time), starting right away. It refuses a channel that everyone in the server can see, and skips the
+post if the channel is made public later. The copy holds only that server's data (other servers the bot is in are left out),
+and the bot deletes its own older posts so the newest 7 stay. Leave the channel empty to turn it off. To restore from one, stop
+the bot and put the file in place of `raidbot.db`; if the bot runs in more than one server, use the `backups` folder instead,
+since the posted copy only has one server's data.
 
 ## Class icons
 

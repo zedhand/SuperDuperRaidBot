@@ -11,7 +11,7 @@ body:
     attributes:
       label: Bot version
       description: Shown by `/status` in Discord, or on the first line of the bot's window when it starts.
-      placeholder: "1.8.5"
+      placeholder: "1.13.2"
     validations:
       required: true
   - type: dropdown
@@ -20,6 +20,8 @@ body:
       label: What is the bot running on?
       options:
         - Windows 10 / 11
+        - Docker on a Raspberry Pi
+        - Docker on a PC or server
         - Linux
         - macOS
         - Raspberry Pi / other
@@ -40,6 +42,8 @@ body:
   - type: textarea
     id: logs
     attributes:
-      label: Last lines from the bot's window
-      description: Copy the last 20 or so lines. Remove your token first.
+      label: Last lines of the log
+      description: >
+        The last 20 or so lines of raidbot.log (next to the bot, or in the data folder with Docker), the bot's window,
+        or `docker compose logs --tail 50`. Remove your token and any player names first.
       render: shell

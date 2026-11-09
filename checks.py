@@ -28,9 +28,10 @@ USER_AGENT = "DiscordBot (https://github.com/zedhand/SuperDuperRaidBot, 1.13.2)"
 
 # View Channels + Send Messages + Embed Links + Read Message History + Use External Emojis
 # + Create Public Threads + Send Messages in Threads (for the optional per-raid discussion threads)
-# + Manage Messages (pin the /config board), Attach Files (/config backupchannel), Manage Events (/alerts events)
+# + Manage Messages and Pin Messages (pin the /config board: Discord moved pinning to its own permission),
+# Attach Files (/config backupchannel), Manage Events and Create Events (/alerts events)
 PERMISSIONS = (1024 + 2048 + 16384 + 65536 + 262144 + (1 << 35) + (1 << 38)
-               + (1 << 13) + (1 << 15) + (1 << 33))
+               + (1 << 13) + (1 << 51) + (1 << 15) + (1 << 33) + (1 << 44))
 
 _MEMBERS_INTENT_FLAGS = (1 << 14) | (1 << 15)  # GATEWAY_GUILD_MEMBERS / _LIMITED
 
@@ -88,6 +89,15 @@ def members_intent_enabled(token: str) -> bool | None:
     except DiscordError:
         return None
     return bool(app.get("flags", 0) & _MEMBERS_INTENT_FLAGS)
+
+
+def bot_is_public(token: str) -> bool | None:
+    """True if anyone can add this bot to their server ('Public Bot' in the Developer Portal), None if unknown."""
+    try:
+        app = api_get("/applications/@me", token)
+    except DiscordError:
+        return None
+    return bool(app.get("bot_public"))
 
 
 def bot_guilds(token: str) -> list[dict]:

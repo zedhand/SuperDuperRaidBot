@@ -56,15 +56,33 @@ def _clip(text: str, limit: int = 1024) -> str:
     return (cut[:at] if at > 0 else cut) + "…"
 
 
+def _fit(entries: list[str], limit: int, sep: str = NL) -> str:
+    """Join whole entries up to `limit` characters, then say how many more there are. Entries are never cut
+    (a note with a comma or *italics* stays whole), and nobody disappears without a count."""
+    if not entries:
+        return "—"
+    full = sep.join(entries)
+    if len(full) <= limit:
+        return full
+    out: list[str] = []
+    for n, entry in enumerate(entries):
+        left_after = len(entries) - n - 1
+        if len(sep.join(out + [entry])) + len(f"{sep}…and {left_after} more") > limit:
+            return (sep.join(out) + sep if out else "") + f"…and {len(entries) - n} more"
+        out.append(entry)
+    return sep.join(out)
+
+
 def _oneline(icon: str, label: str, rows, num, limit: int = 1024, suffix=None, realms=None, notes=None) -> str:
     suffix, realms = suffix or {}, realms or {}
-    names = ", ".join(
+    entries = [
         (f"`{num[s['user_id']]}` **{s['char_name']}**" + (f" ({realms[s['user_id']]})" if s["user_id"] in realms else "")
          if s["char_name"]
          else f"`{num[s['user_id']]}` <@{s['user_id']}>")
         + suffix.get(s["user_id"], "") + _note(s, notes)
-        for s in rows)
-    return _clip(f"{icon} **{label} ({len(rows)})** : {names}", limit)
+        for s in rows]
+    head = f"{icon} **{label} ({len(rows)})** : "
+    return head + _fit(entries, limit - len(head), ", ")
 
 
 def composition_warnings(event, attending) -> list[str]:
@@ -105,6 +123,14 @@ def build_embed(event, signups, locked: bool, buffs: bool = False, realms: dict 
     return embed
 
 
+def _tanks_and_healers(tanks: list[str], healer_head: str, healers: list[str], limit: int) -> str:
+    """Tanks and healers share one field. Healers are always given room (up to half), so a long tank list can
+    never push the healer heading and every healer out of the post."""
+    room = limit - len(healer_head)
+    tank_text = _fit(tanks, room - min(len(_column(healers)), room // 2))
+    return tank_text + healer_head + _fit(healers, room - len(tank_text))
+
+
 def _build(event, signups, locked: bool, limit: int, buffs: bool = False, realms: dict | None = None,
            notes: dict | None = None) -> discord.Embed:
     ts = event["start_ts"]
@@ -136,14 +162,14 @@ def _build(event, signups, locked: bool, limit: int, buffs: bool = False, realms
 
     embed.add_field(
         name=f"{wd.GROUP_ICON['tank']} Tank ({count('tank', tanks)})",
-        value=_clip(_column([_entry(s, num, realms, notes) for s in tanks]) +
-                    f"\n\n**{wd.GROUP_ICON['healer']} Healer ({count('healer', healers)})**\n" +
-                    _column([_entry(s, num, realms, notes) for s in healers]), limit),
+        value=_tanks_and_healers([_entry(s, num, realms, notes) for s in tanks],
+                                 f"\n\n**{wd.GROUP_ICON['healer']} Healer ({count('healer', healers)})**\n",
+                                 [_entry(s, num, realms, notes) for s in healers], limit),
         inline=True)
     embed.add_field(name=f"{wd.GROUP_ICON['melee']} Melee ({len(melee)})",
-                    value=_clip(_column([_entry(s, num, realms, notes) for s in melee]), limit), inline=True)
+                    value=_fit([_entry(s, num, realms, notes) for s in melee], limit), inline=True)
     embed.add_field(name=f"{wd.GROUP_ICON['ranged']} Ranged ({len(ranged)})",
-                    value=_clip(_column([_entry(s, num, realms, notes) for s in ranged]), limit), inline=True)
+                    value=_fit([_entry(s, num, realms, notes) for s in ranged], limit), inline=True)
 
     # Composition warnings (only while signups are open)
     if not locked:

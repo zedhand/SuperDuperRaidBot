@@ -52,8 +52,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         base = f"http://127.0.0.1:{state['port']}"
-        if self.path in ("/api", "/bad", "/same", "/nodigest"):
-            tag = "v1.0" if self.path == "/same" else "v9.9"
+        if self.path in ("/api", "/bad", "/same", "/nodigest", "/weird"):
+            tag = {"/same": "v1.0", "/weird": "vnot-a-version"}.get(self.path, "v9.9")
             digest = "sha256:" + ("0" * 64 if self.path == "/bad" else GOOD_SHA)
             asset = {"name": "Bot-9.9.zip", "browser_download_url": base + "/asset.zip", "digest": digest}
             if self.path == "/nodigest":
@@ -151,6 +151,28 @@ p = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-
                     "-ApiUrl", "http://127.0.0.1:1/api", "-Yes", "-SkipDeps"], capture_output=True, text=True, timeout=120)
 check("fails politely and changes nothing", p.returncode == 1 and "Update failed" in (p.stdout + p.stderr)
       and 'VERSION = "1.0"' in (d / "bot.py").read_text())
+
+print("a release number that can't be read")
+d = fresh_install()
+code, out = run_update(d, "/weird")
+check("is never treated as newer (no surprise downgrade)", code == 0 and "already up to date" in out
+      and 'VERSION = "1.0"' in (d / "bot.py").read_text(), out)
+
+print("the bot is still running")
+d = fresh_install()
+held = open(d / "raidbot.db.lock", "a+")  # what the running bot keeps open
+try:
+    code, out = run_update(d, "/api")
+finally:
+    held.close()
+if sys.platform == "win32":
+    # Update.bat is Windows-only, and the check relies on Windows refusing to open a file another process has open.
+    # PowerShell on macOS/Linux can't see that, so there this part only proves the updater still runs.
+    check("refuses and changes nothing", code == 1 and "still running" in out
+          and 'VERSION = "1.0"' in (d / "bot.py").read_text(), out)
+    code, out = run_update(d, "/api")
+check("once it's closed the update goes ahead", code == 0 and 'VERSION = "9.9"' in (d / "bot.py").read_text(), out)
+check("setup.py isn't brought back after first-run setup deleted it", not (d / "setup.py").exists())
 
 server.shutdown()
 print(f"\n{'all passed' if not failed else str(failed) + ' failed'}")

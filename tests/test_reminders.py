@@ -113,7 +113,7 @@ check("a raid that has already started gets no reminder", tick() == [] and db.ev
 closed = event("Closed", 10)
 sign(closed, 31, "in")
 db.set_closed(closed, True)
-check("a closed raid gets no reminder", tick() == [] and db.event(closed)["reminded"] == 0)
+check("a raid closed for sign-ups still reminds the people already in it", len(tick()) == 1 and db.event(closed)["reminded"] == 1)
 gone = event("Channel deleted", 10, channel=999)
 sign(gone, 32, "in")
 check("channel missing: no crash, marked so it doesn't retry every minute",

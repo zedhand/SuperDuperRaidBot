@@ -111,8 +111,8 @@ UTILITY_BY_PRESET = {
     "season_of_discovery": dict(_BR_CLASSIC),
     "tbc_classic": {**_BL_SHAMAN, **_BR_CLASSIC},
     "wrath_classic": {**_BL_SHAMAN, "battle_res": ("a battle res", ("Druid", "Death Knight"))},
-    "cata_classic": {"bloodlust": ("Bloodlust", ("Shaman", "Mage")),
-                     "battle_res": ("a battle res", ("Druid", "Death Knight"))},
+    "cata_classic": {"bloodlust": ("Bloodlust", ("Shaman", "Mage")),  # Soulstone works on the dead from 4.0
+                     "battle_res": ("a battle res", ("Druid", "Death Knight", "Warlock"))},
     "mists_classic": {"bloodlust": ("Bloodlust", ("Shaman", "Mage", "Hunter")),
                       "battle_res": ("a battle res", ("Druid", "Death Knight", "Warlock"))},
     "wow_forever": dict(_BR_CLASSIC),

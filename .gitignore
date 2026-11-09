@@ -3,6 +3,8 @@
 backups/
 raidbot.log*
 *.db.damaged-*
+*.db.lock
+.setup_ok
 __pycache__/
 .venv/
 *.pyc

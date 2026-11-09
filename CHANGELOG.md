@@ -1,5 +1,42 @@
 # Changelog
 
+## Unreleased
+Fixes from a full audit of 1.13.2. Nothing new to set up; every change keeps today's settings working.
+- **Reminders on closed raids.** A raid closed for sign-ups (by `/config autoclose` or `/raid close`) still gets its reminder. Before, turning on autoclose quietly stopped every reminder.
+- **Private channels stay private.**
+  - `/always join` only lists and accepts repeating raids you can see.
+  - The board, the low-signup alert and Discord events never show a raid in a private thread, and they now check members as well as roles.
+  - A channel's raid leaders see only their own raids in `/stats team` and `/stats export`.
+  - `/raid add` won't sign up someone who can't see the raid's channel.
+  - Reminders aren't sent by DM to people who left or lost access to the channel.
+- **Safer roles.** `/config officer` and `/config channel officer:` refuse @everyone. `/raid create ping:` needs **Mention Everyone** yourself to ping @everyone or a role that isn't mentionable.
+- **More reliable.**
+  - A repeating raid that can't be posted (an outage, a missing permission) keeps trying for about a day and a half, then says so in the log channel, instead of stopping for good after 5 minutes.
+  - Moving a raid sends the DM reminders again for the new time.
+  - Only one copy of the bot can run on the same database.
+  - Settings that redraw every raid post answer straight away.
+  - The automatic no-show check is skipped, not run hours late, if the bot was offline when it was due.
+  - The bench, Discord events and closed posts no longer trip over two updates arriving at once.
+- **Raid posts.** A very full roster now ends with "…and N more" instead of cutting names off, and the healers always keep their place next to the tanks.
+- **Docker and Raspberry Pi.**
+  - `docker stop` shuts the bot down cleanly.
+  - `docker compose ps` shows whether it's healthy.
+  - The image is built from pinned versions, so every build is the one that was tested.
+  - `./docker-update.sh` keeps the previous version and prints how to go back to it.
+- **Updater (`Update.bat`).**
+  - It refuses while the bot is still running.
+  - It puts the old files back if copying fails.
+  - It never installs a release whose version number it can't read.
+- **Smaller fixes.**
+  - `/help` lists every setting.
+  - The invite link also asks for Discord's newer **Pin Messages** and **Create Events** permissions.
+  - `/status` warns when class icons can't show.
+  - `/forgetme` overwrites the deleted data in the database file.
+  - Backups no longer fail when the bot's folder has a `%` in its name.
+  - Cataclysm Classic counts Warlocks as a battle res.
+  - The bot warns at startup if anyone can add it to their server ("Public Bot").
+  - Docs fixed to match the bot.
+
 ## 1.13.2
 A small Docker follow-up: the Raspberry Pi now downloads a ready-made image instead of building the bot on every update.
 - **Ready-made Docker image.** Every release now comes with an image for the Raspberry Pi (arm64) and PCs (amd64) at `ghcr.io/zedhand/superduperraidbot`, so `./docker-update.sh` just downloads it instead of building the bot on the Pi. Building it yourself still works: `./docker-update.sh --build` (see [DOCKER.md](DOCKER.md)), and the script falls back to that by itself if the download fails.

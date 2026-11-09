@@ -7,7 +7,7 @@ guild's roster, characters and raid history stay on your own computer.
 [![Tests](https://github.com/zedhand/SuperDuperRaidBot/actions/workflows/tests.yml/badge.svg)](https://github.com/zedhand/SuperDuperRaidBot/actions/workflows/tests.yml)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
-![discord.py 2.4+](https://img.shields.io/badge/discord.py-2.4%2B-5865F2)
+![discord.py 2.7+](https://img.shields.io/badge/discord.py-2.7%2B-5865F2)
 ![Platform: Windows one-click, any OS from source](https://img.shields.io/badge/platform-Windows%20one--click%20%7C%20any%20OS-lightgrey)
 
 Players save their characters, then sign up to a raid post with a button. The post shows the roster grouped by
@@ -131,9 +131,11 @@ channel's own permissions can still take one away there, so check those if an ex
 
 | Extra | Permission it needs |
 |---|---|
-| `/alerts events` (raids in the server's Events list) | **Manage Events** (server-wide, on the bot's role) |
-| `/config board` (the pinned *Upcoming raids* message) | **Manage Messages** in the board's channel, to pin it. Without it the board still works, unpinned |
+| `/alerts events` (raids in the server's Events list) | **Manage Events** or **Create Events** (server-wide, on the bot's role) |
+| `/config board` (the pinned *Upcoming raids* message) | **Pin Messages** (or **Manage Messages**) in the board's channel, to pin it. Without it the board still works, unpinned |
 | `/config backupchannel` (daily backup post) | **Attach Files** in that channel |
+| `/config voicechannel` (automatic no-shows) | **View Channel** on that voice channel, so the bot can see who is in it. Without it the check sees nobody and is skipped |
+| Class icons on raid posts (`icons/` folder) | **Use External Emojis** in the raid channels. Without it the icons show as plain coloured squares |
 
 ### Step 4: Give officers a way to post raids
 Anyone with the **Manage Events** permission can already post raids. To let a role do it without that permission, run
@@ -279,7 +281,7 @@ on any single date. `/always list` shows what you're in, and `/always leave` sto
 - **Reminder** before the raid (default 30 minutes) pinging everyone who's in, late or tentative. It's sent once. If nobody has signed up yet when it's due, it waits for the first signup.
 - **Locking.** When the start time passes the post greys out and signups close.
 - **Recurring raids.** With `repeat` set, the next one is posted when the current one starts.
-- **Automatic no-shows (optional).** With a voice channel set (`/config voicechannel`), 15 minutes after a raid starts the bot looks at who is in that channel. Anyone signed up as **in** who isn't there is marked as a no-show, so officers don't have to do it by hand, and the result is written to the log channel. If **nobody** is in the channel the check is skipped (the raid is probably being run somewhere else), people marked **late** are never checked, and a mistake is one `/raid noshow` (undo) away. It only looks at raids that started in the last 6 hours, so turning it on never rewrites old attendance.
+- **Automatic no-shows (optional).** With a voice channel set (`/config voicechannel`), 15 minutes after a raid starts (change it with the `minutes:` option, 5 to 120) the bot looks at who is in that channel. Anyone signed up as **in** who isn't there is marked as a no-show, so officers don't have to do it by hand, and the result is written to the log channel. If **nobody** is in the channel the check is skipped (the raid is probably being run somewhere else), people marked **late** are never checked, and a mistake is one `/raid noshow` (undo) away. If the bot was offline when the check was due, that raid's check is skipped rather than run late. Turning it on never rewrites old attendance.
 - **Class limits (optional).** `/raid create classes: Mage 4, Warlock 2` limits how many of a class can be in. Extra people go on the bench and move in when a spot opens, like role limits. The limits show in the post's footer and are kept by templates, copies and repeating raids. `/raid edit classes: off` removes them.
 - **Signup notes (optional, `/config notes`).** A player types `/note` and picks a raid they signed up for to add a short note, e.g. `late 15 min` or `can swap to heals` (up to 60 characters; leave the text out to clear it). The note stays when they change status or character. Officers see notes in `/raid roster`, and with `onpost: True` they also show in italics after the name on the raid post. Formatting, mentions and links are taken out, so a note can't ping anyone or break the post.
 - **Missing utility warning (optional, `/config buffs`).** Once 8 or more people are in and none of them can provide it, the post says `No Bloodlust yet (Shaman, Mage, Evoker, Hunter)` or `No a battle res yet (...)`. The lists are in `wow_data.py` and are short on purpose; Classic Era, Season of Discovery and WoW: Forever have no Bloodlust.
@@ -502,7 +504,7 @@ Still stuck? [Open an issue](../../issues/new/choose) with the bot version and t
 - **What the bot can see:** member lists (that's what *Server Members Intent* is for, e.g. for `/raid unsigned`) and the
   commands and button clicks aimed at it. It does **not** read your chat messages.
 - **What it can do:** only what its role allows in each channel. Give it just the channels it needs. The invite link
-  asks for **Manage Events**, **Manage Messages** and **Attach Files**, but they're only used by the optional extras
+  asks for **Manage Events**, **Create Events**, **Manage Messages**, **Pin Messages** and **Attach Files**, but they're only used by the optional extras
   listed in [Step 3](#step-3-check-the-bot-has-access-to-your-channels); untick them on the invite screen, or take them
   off the bot's role later, if you don't use those.
 - **What it sends to other websites:** nothing by default; it only talks to Discord. Two **optional** features contact another site, and only when an admin turns them on: `/config updatenotice` asks GitHub for the newest release number (no information about you or your server), and `/config raiderio` lets a player run `/character import`, which sends the character name and realm *that player typed* to raider.io to look it up (no accounts, nothing else).
@@ -523,6 +525,8 @@ save the file, and restart the bot.
 | `TIMEZONE` | Default timezone (`/config timezone` overrides it per server) |
 | `WOW_VERSION` | the class/spec list: `retail`, `classic_era` (also Hardcore), `season_of_discovery`, `tbc_classic`, `wrath_classic`, `cata_classic`, `mists_classic` or `wow_forever` |
 | `REMINDER_MINUTES` | Default reminder lead time (`/config reminder` overrides it) |
+| `DB_PATH` | Optional: where the database lives (default `raidbot.db` next to the bot; Docker uses `/data/raidbot.db`) |
+| `LOG_DIR` | Optional: the folder for `raidbot.log` (default: next to the bot; Docker uses `/data`) |
 
 ## Updating
 
@@ -546,7 +550,7 @@ signups (and so their attendance history), their `/always` sign-ups, their `/rem
 kept for `/raid restore`. The bot asks first, then takes their name off the raid posts. Raids they created stay. The daily
 backups still hold the old data until they're replaced (within 7 days), as does any copy an admin made with `/config backup`.
 
-Admins can get a copy of their server's data any time with `/config backup` (it contains your members' Discord IDs, so keep it private; like the daily backup post, it holds no other server's raids, players or settings). If `raidbot.db` is ever damaged, the bot restores the newest healthy daily backup on the next start, keeps the damaged file as `raidbot.db.damaged-<time>`, and `/status` tells you it happened. If there is no healthy backup it stops and explains, leaving the file untouched. Errors are also written to `raidbot.log` (the newest 5 MB are kept).
+Admins can get a copy of their server's data any time with `/config backup` (it contains your members' Discord IDs, so keep it private; like the daily backup post, it holds no other server's raids, players or settings). If `raidbot.db` is ever damaged, the bot restores the newest healthy daily backup on the next start, keeps the damaged file as `raidbot.db.damaged-<time>`, and `/status` tells you it happened. If there is no healthy backup it stops and explains, leaving the file untouched. Errors are also written to `raidbot.log` (about 6 MB are kept: the current file plus 5 older ones of 1 MB each).
 
 To keep a backup somewhere other than the bot's PC, `/config backupchannel` picks a channel where the bot posts a copy every
 day after 04:00 (server time), starting right away. It refuses a channel that everyone in the server can see, and skips the

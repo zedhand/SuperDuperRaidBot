@@ -3,6 +3,7 @@
 *
 !Dockerfile
 !requirements.txt
+!constraints.txt
 !bot.py
 !checks.py
 !db.py

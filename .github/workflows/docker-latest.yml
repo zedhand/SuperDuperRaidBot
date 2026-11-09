@@ -1,8 +1,9 @@
 name: Docker latest
 
-# When you press "Publish release" on a draft, this points ghcr.io/zedhand/superduperraidbot:latest at that
-# version's image (already built and pushed by the Release workflow). Nothing is rebuilt; only the tag moves.
-# Pre-releases are skipped, so :latest is always the newest published release.
+# When you press "Publish release" on a draft, this points ghcr.io/zedhand/superduperraidbot:latest and the
+# :major.minor tag (for example :1.13) at that version's image, already built and pushed by the Release workflow.
+# Nothing is rebuilt; only the tags move. Pre-releases and test versions (v1.14.0-rc1) are skipped, and :latest
+# only moves when this is GitHub's newest release, so it never goes backwards.
 
 on:
   release:
@@ -24,7 +25,7 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: docker/setup-buildx-action@v4
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
       - name: Log in to ghcr.io
         env:
           TOKEN: ${{ github.token }}
@@ -34,8 +35,23 @@ jobs:
         env:
           TAG: ${{ github.event.release.tag_name }}
           IMAGE: ghcr.io/${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         run: |
           image=$(echo "$IMAGE" | tr '[:upper:]' '[:lower:]')
           version=${TAG#v}
-          docker buildx imagetools create --tag "$image:latest" "$image:$version"
-          echo "$image:latest now points at $version" >> "$GITHUB_STEP_SUMMARY"
+          case "$version" in *-*)
+            echo "$version is a test version, so :latest and the minor tag stay where they are." >> "$GITHUB_STEP_SUMMARY"
+            exit 0;;
+          esac
+          minor=${version%.*}
+          docker buildx imagetools create --tag "$image:$minor" "$image:$version"
+          echo "$image:$minor now points at $version" >> "$GITHUB_STEP_SUMMARY"
+          # :latest only moves forward: publishing a fix for an older version (a backport) leaves it alone.
+          newest=$(gh api "repos/$REPO/releases/latest" --jq .tag_name)
+          if [ "$newest" = "$TAG" ]; then
+            docker buildx imagetools create --tag "$image:latest" "$image:$version"
+            echo "$image:latest now points at $version" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "$TAG isn't the newest release ($newest is), so :latest stays where it is." >> "$GITHUB_STEP_SUMMARY"
+          fi

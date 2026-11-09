@@ -50,10 +50,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: docker/setup-qemu-action@v3      # lets the PC runner build the Raspberry Pi (arm64) image too
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-qemu-action@v4      # lets the PC runner build the Raspberry Pi (arm64) image too
+      - uses: docker/setup-buildx-action@v4
       - name: Build for amd64 and arm64 (not pushed anywhere)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64
